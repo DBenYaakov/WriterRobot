@@ -11,14 +11,25 @@ import (
 const (
 	DefaultPenUp   = 0.50
 	DefaultPenDown = 1.70
+	DefaultStartX  = 0.0
+	DefaultStartY  = 0.0
 )
 
 type Config struct {
 	PenUp   float64 `json:"pen_up"`
 	PenDown float64 `json:"pen_down"`
+	StartX  float64 `json:"start_x"`
+	StartY  float64 `json:"start_y"`
 }
 
-func Default() Config { return Config{PenUp: DefaultPenUp, PenDown: DefaultPenDown} }
+func Default() Config {
+	return Config{
+		PenUp:   DefaultPenUp,
+		PenDown: DefaultPenDown,
+		StartX:  DefaultStartX,
+		StartY:  DefaultStartY,
+	}
+}
 
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()

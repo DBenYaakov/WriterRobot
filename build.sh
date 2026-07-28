@@ -11,6 +11,5 @@ for dir in ./cmd/*; do
 
     name="$(basename "$dir")"
     echo "Building $name..."
-
     go build -o ".build/$name" "$dir"
 done

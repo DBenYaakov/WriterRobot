@@ -23,30 +23,36 @@ go test ./...
 go build -o ta4-send ./cmd/ta4-send
 ```
 
-## Calibrate the pen-down position
+## Calibrate the pen and starting position
 
-Disconnect any existing `screen` session, then run:
+Run:
 
 ```bash
-./ta4-send \
+./.build/ta4-send \
   --port /dev/cu.usbmodem201912341 \
   --calibrate
 ```
 
-The calibration session automatically resets, homes, and dwells. It then moves to the currently configured pen-down position.
+Calibration now has two stages after the machine homes:
 
-- **Down arrow:** lower the pen by 0.05 mm
-- **Up arrow:** raise the pen by 0.05 mm
-- **Enter:** save the selected position
-- **Ctrl-C:** cancel without saving
+1. **Pen-down height**
+   - Up arrow raises the pen by `--calibration-step`.
+   - Down arrow lowers the pen by `--calibration-step`.
+   - Enter accepts the pen-down value and raises the pen.
+2. **Starting position**
+   - Arrow keys move X/Y by `--position-step` (default `1.0` mm).
+   - `U` raises the pen.
+   - `D` lowers the pen, which is useful for checking the exact mark location.
+   - Enter saves X/Y and raises the pen.
 
-Change the increment with `--calibration-step`, for example:
+Escape or Ctrl-C cancels without saving. Example with finer increments:
 
 ```bash
-./ta4-send --port /dev/cu.usbmodem201912341 --calibrate --calibration-step 0.01
+./.build/ta4-send --port /dev/cu.usbmodem201912341 --calibrate \
+  --calibration-step 0.01 --position-step 0.25
 ```
 
-On macOS, the configuration is saved under the user's Application Support directory as `writerrobot/config.json`. The program prints the exact path after saving.
+The saved JSON configuration contains `pen_up`, `pen_down`, `start_x`, and `start_y`. G-code files may use `{{PEN_UP}}`, `{{PEN_DOWN}}`, `{{START_X}}`, and `{{START_Y}}` placeholders.
 
 ## Configured pen positions in G-code
 
@@ -116,3 +122,52 @@ To test different tolerances or placement:
 ```
 
 The `--y` value identifies the top of the first row. Because the machine homes at the upper-left and moves down the paper with negative Y coordinates, subsequent rows are placed at increasingly negative Y values.
+
+## Generate the motion and feed-rate calibration pattern
+
+The generalized `build.sh` discovers and builds every command under `cmd/`:
+
+```bash
+./build.sh
+```
+
+Generate the default six-row motion test:
+
+```bash
+./.build/ta4-motion-test
+```
+
+This writes `testdata/motion-calibration.gcode`. From top to bottom, the rows use drawing feed rates of `200`, `400`, `600`, `800`, `1000`, and `1200` mm/min. Each row draws:
+
+- a horizontal line
+- a vertical line
+- a 45-degree diagonal
+- a sharp-corner box
+- a 4 mm circle
+- an 18 mm circle
+- a tightening spiral
+- a continuous sweeping S-curve
+
+Send the pattern using the saved pen calibration:
+
+```bash
+./.build/ta4-send \
+  --port /dev/cu.usbmodem201912341 \
+  testdata/motion-calibration.gcode
+```
+
+The rows are intentionally identical except for feed rate. Compare line straightness, corner overshoot, visible vibration, circle roundness, spiral consistency, and hesitation along the S-curve. Stop the machine if a higher-speed row begins to chatter or flex excessively.
+
+Customize placement or feed rates as needed:
+
+```bash
+./.build/ta4-motion-test \
+  --feeds 300,450,600,750,900 \
+  --x 20 \
+  --y -20 \
+  --row-spacing 40
+```
+
+## Planned handwriting stroke profile
+
+The SVG-to-G-code stage should support a `handwriting` stroke profile that varies feed rate with local curvature: faster on long straight sweeps and slower through tight curves and direction changes. With a gel pen, this also varies ink prominence in a way that more closely resembles a human signature.
