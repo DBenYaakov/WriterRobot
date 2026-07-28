@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/DBenYaakov/WriterRobot/internal/config"
+	"github.com/DBenYaakov/WriterRobot/internal/diagnostics"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
+	"github.com/DBenYaakov/WriterRobot/internal/machine"
 	"go.bug.st/serial"
 	"golang.org/x/term"
 )
@@ -67,6 +70,9 @@ func run() int {
 	defer stop()
 	sender := grbl.New(port, grbl.Options{CommandTimeout: *commandTO, IdleTimeout: *idleTO, ResetOnOpen: *reset, HomeOnStart: *home, StartupDwell: *startupDwell, Verbose: *verbose, Log: os.Stdout})
 	defer sender.Close()
+	robot := machine.New(sender)
+	pen := machine.NewPen(robot, cfg.PenUp, cfg.PenDown)
+	recovery := newMachineRecovery(sender, robot, pen, os.Stdout, defaultRecoveryTimings)
 
 	if *calibrateMode {
 		if *calibrationStep <= 0 {
@@ -78,7 +84,7 @@ func run() int {
 		if err := sender.Initialize(ctx); err != nil {
 			return fail("initialize GRBL", err)
 		}
-		if err := calibrate(ctx, sender, &cfg, *calibrationStep, *positionStep); err != nil {
+		if err := calibrate(ctx, sender, robot, pen, &cfg, *calibrationStep, *positionStep, recovery); err != nil {
 			return fail("calibrate", err)
 		}
 		path, err := config.Save(cfg)
@@ -112,14 +118,26 @@ func run() int {
 	fmt.Printf("Using configuration %s (pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f)\n", cfgPath, cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY)
 	fmt.Printf("Sending %d commands to %s at %d baud\n", len(lines), *portName, *baud)
 	if err := sender.Initialize(ctx); err != nil {
+		recoverAfterInterrupt(ctx, recovery, err)
 		return fail("initialize GRBL", err)
 	}
+	if err := robot.MoveMachineXYTo(ctx, cfg.StartX, cfg.StartY); err != nil {
+		recoverAfterInterrupt(ctx, recovery, err)
+		return fail("move to paper origin", err)
+	}
+	if err := robot.SetProgramXYOrigin(ctx); err != nil {
+		recoverAfterInterrupt(ctx, recovery, err)
+		return fail("set paper origin", err)
+	}
+	fmt.Printf("Paper origin set to machine X%.3f Y%.3f; program coordinates are now relative to that point.\n", cfg.StartX, cfg.StartY)
 	if err := sender.Send(ctx, lines); err != nil {
+		recoverAfterInterrupt(ctx, recovery, err)
 		return fail("stream G-code", err)
 	}
 	if *waitIdle {
 		fmt.Println("Waiting for machine to become Idle...")
 		if err := sender.WaitIdle(ctx); err != nil {
+			recoverAfterInterrupt(ctx, recovery, err)
 			return fail("wait for completion", err)
 		}
 	}
@@ -127,11 +145,199 @@ func run() int {
 	return 0
 }
 
-func calibrate(ctx context.Context, sender *grbl.Sender, cfg *config.Config, penStep, positionStep float64) error {
+type recoveryTimings struct {
+	holdWait       time.Duration
+	resetWait      time.Duration
+	commandWait    time.Duration
+	finalStateWait time.Duration
+}
+
+type gcodeStreamer interface {
+	Send(context.Context, []gcode.Line) error
+}
+
+var defaultRecoveryTimings = recoveryTimings{
+	holdWait:       2 * time.Second,
+	resetWait:      5 * time.Second,
+	commandWait:    5 * time.Second,
+	finalStateWait: 2 * time.Second,
+}
+
+type recoveryReport struct {
+	feedHoldSent       bool
+	feedHoldErr        error
+	stopStateConfirmed bool
+	stopState          string
+	stopStateErr       error
+	resetSent          bool
+	resetErr           error
+	unlockAttempted    bool
+	unlockErr          error
+	penUpAttempted     bool
+	penUpErr           error
+	penUpSkippedReason string
+	finalConfirmed     bool
+	finalState         string
+	finalStateErr      error
+}
+
+type machineRecovery struct {
+	sender  *grbl.Sender
+	machine *machine.Machine
+	pen     *machine.Pen
+	log     io.Writer
+	timings recoveryTimings
+
+	mu       sync.Mutex
+	done     chan struct{}
+	report   recoveryReport
+	finished bool
+}
+
+func newMachineRecovery(sender *grbl.Sender, robot *machine.Machine, pen *machine.Pen, log io.Writer, timings recoveryTimings) *machineRecovery {
+	if log == nil {
+		log = io.Discard
+	}
+	return &machineRecovery{sender: sender, machine: robot, pen: pen, log: log, timings: timings}
+}
+
+func recoverAfterInterrupt(ctx context.Context, recovery *machineRecovery, err error) {
+	if err == nil || recovery == nil || ctx.Err() == nil {
+		return
+	}
+	recovery.interrupt()
+}
+
+func (r *machineRecovery) interrupt() recoveryReport {
+	return r.run(true)
+}
+
+func (r *machineRecovery) penUpOnly() recoveryReport {
+	return r.run(false)
+}
+
+func (r *machineRecovery) run(feedHold bool) recoveryReport {
+	r.mu.Lock()
+	if r.done != nil {
+		done := r.done
+		r.mu.Unlock()
+		<-done
+		r.mu.Lock()
+		report := r.report
+		r.mu.Unlock()
+		return report
+	}
+	done := make(chan struct{})
+	r.done = done
+	r.mu.Unlock()
+
+	var report recoveryReport
+	if feedHold {
+		report.feedHoldSent = true
+		report.feedHoldErr = r.sender.FeedHold()
+		if report.feedHoldErr != nil {
+			fmt.Fprintf(r.log, "Recovery: feed hold could not be sent: %v\n", report.feedHoldErr)
+		} else {
+			fmt.Fprintln(r.log, "Recovery: feed hold sent.")
+			state, _, err := r.waitForState(r.timings.holdWait, "Hold", "Idle")
+			if err != nil {
+				report.stopStateErr = err
+				fmt.Fprintf(r.log, "Recovery: GRBL stop/Hold state could not be confirmed: %v\n", err)
+			} else {
+				report.stopStateConfirmed = true
+				report.stopState = state
+				fmt.Fprintf(r.log, "Recovery: GRBL reported state %s.\n", state)
+			}
+		}
+	}
+
+	needsReset := feedHold && (!report.stopStateConfirmed || stateBase(report.stopState) != "Idle")
+	if needsReset {
+		report.resetSent = true
+		resetCtx, cancel := context.WithTimeout(context.Background(), r.timings.resetWait)
+		report.resetErr = r.sender.SoftReset(resetCtx)
+		cancel()
+		if report.resetErr != nil {
+			if strings.Contains(report.resetErr.Error(), "soft reset:") {
+				fmt.Fprintf(r.log, "Recovery: GRBL reset could not be sent: %v\n", report.resetErr)
+			} else {
+				fmt.Fprintf(r.log, "Recovery: GRBL reset sent, but startup was not confirmed: %v\n", report.resetErr)
+			}
+			report.penUpSkippedReason = "ordinary G-code may not execute safely after feed hold when reset fails"
+			fmt.Fprintf(r.log, "Recovery: pen-up was not attempted because %s.\n", report.penUpSkippedReason)
+			return r.finish(report)
+		}
+		fmt.Fprintln(r.log, "Recovery: GRBL reset sent and startup confirmed.")
+
+		report.unlockAttempted = true
+		unlockCtx, cancel := context.WithTimeout(context.Background(), r.timings.commandWait)
+		report.unlockErr = r.sender.Command(unlockCtx, "$X")
+		cancel()
+		if report.unlockErr != nil {
+			fmt.Fprintf(r.log, "Recovery: GRBL alarm unlock was attempted but failed: %v\n", report.unlockErr)
+		}
+	}
+
+	report.penUpAttempted = true
+	fmt.Fprintf(r.log, "Recovery: pen-up attempted at Z%.3f.\n", r.pen.UpZ())
+	if err := r.runWithCommandTimeout(r.machine.SetUnitsMillimeters); err != nil {
+		report.penUpErr = fmt.Errorf("set millimeters before pen-up: %w", err)
+		fmt.Fprintf(r.log, "Recovery: pen-up failed: %v\n", report.penUpErr)
+		return r.finish(report)
+	}
+	if err := r.runWithCommandTimeout(r.pen.Raise); err != nil {
+		report.penUpErr = err
+		fmt.Fprintf(r.log, "Recovery: pen-up failed: %v\n", err)
+		return r.finish(report)
+	}
+	fmt.Fprintln(r.log, "Recovery: pen-up command accepted by GRBL.")
+
+	state, _, err := r.waitForState(r.timings.finalStateWait, "Idle")
+	if err != nil {
+		report.finalStateErr = err
+		fmt.Fprintf(r.log, "Recovery: final machine state could not be confirmed: %v\n", err)
+	} else {
+		report.finalConfirmed = true
+		report.finalState = state
+		fmt.Fprintf(r.log, "Recovery: final GRBL state confirmed as %s.\n", state)
+	}
+
+	return r.finish(report)
+}
+
+func (r *machineRecovery) runWithCommandTimeout(fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timings.commandWait)
+	defer cancel()
+	return fn(ctx)
+}
+
+func (r *machineRecovery) waitForState(timeout time.Duration, states ...string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return r.sender.WaitForState(ctx, states...)
+}
+
+func (r *machineRecovery) finish(report recoveryReport) recoveryReport {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.report = report
+	r.finished = true
+	close(r.done)
+	return report
+}
+
+func stateBase(state string) string {
+	if i := strings.IndexByte(state, ':'); i >= 0 {
+		return state[:i]
+	}
+	return state
+}
+
+func calibrate(ctx context.Context, sender *grbl.Sender, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, penStep, positionStep float64, recovery *machineRecovery) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("standard input is not an interactive terminal")
 	}
-	if err := sender.Command(ctx, "G21"); err != nil {
+	if err := robot.SetUnitsMillimeters(ctx); err != nil {
 		return err
 	}
 	if err := sender.Command(ctx, "G90"); err != nil {
@@ -144,31 +350,43 @@ func calibrate(ctx context.Context, sender *grbl.Sender, cfg *config.Config, pen
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	if err := calibratePen(ctx, sender, cfg, penStep); err != nil {
+	if err := calibratePen(ctx, pen, cfg, penStep, recovery); err != nil {
 		return err
 	}
-	return calibrateStartPosition(ctx, sender, cfg, positionStep)
+	return calibrateStartPosition(ctx, sender, robot, pen, cfg, positionStep, recovery)
 }
 
-func calibratePen(ctx context.Context, sender *grbl.Sender, cfg *config.Config, step float64) error {
+func calibratePen(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery) error {
+	return calibratePenFrom(ctx, pen, cfg, step, recovery, os.Stdin)
+}
+
+func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader) (err error) {
 	z := cfg.PenDown
-	if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F200", z)); err != nil {
+	if err := pen.MoveTo(ctx, z, machine.DefaultPenLowerFeed); err != nil {
 		return err
 	}
+	penDown := true
+	defer func() {
+		if err != nil && penDown && recovery != nil {
+			recovery.penUpOnly()
+		}
+	}()
 
 	fmt.Printf("\r\nStep 1 of 2: pen-down calibration (current Z%.3f)\r\n", z)
 	fmt.Printf("Down arrow: lower (+%.3f mm) | Up arrow: raise (-%.3f mm) | Enter: accept | Esc/Ctrl-C: cancel\r\n", step, step)
 	for {
-		key, err := readKey(os.Stdin)
+		key, err := readKey(input)
 		if err != nil {
 			return err
 		}
 		switch key {
 		case keyEnter:
 			cfg.PenDown = z
-			if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F300", cfg.PenUp)); err != nil {
+			pen.SetDownZ(z)
+			if err := pen.Raise(ctx); err != nil {
 				return err
 			}
+			penDown = false
 			fmt.Printf("\r\nSelected pen-down Z%.3f; pen raised.\r\n", z)
 			return nil
 		case keyCancel:
@@ -183,38 +401,50 @@ func calibratePen(ctx context.Context, sender *grbl.Sender, cfg *config.Config, 
 		if z < 0 {
 			z = 0
 		}
-		if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F200", z)); err != nil {
+		if err := pen.MoveTo(ctx, z, machine.DefaultPenLowerFeed); err != nil {
 			return err
 		}
 		fmt.Printf("\rZ%.3f   ", z)
 	}
 }
 
-func calibrateStartPosition(ctx context.Context, sender *grbl.Sender, cfg *config.Config, step float64) error {
+func calibrateStartPosition(ctx context.Context, streamer gcodeStreamer, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery) error {
+	return calibrateStartPositionFrom(ctx, streamer, robot, pen, cfg, step, recovery, os.Stdin)
+}
+
+func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader) (err error) {
 	x, y := cfg.StartX, cfg.StartY
 	penDown := false
-	if err := sender.Command(ctx, fmt.Sprintf("G0 X%.3f Y%.3f", x, y)); err != nil {
+	defer func() {
+		if err != nil && penDown && recovery != nil {
+			recovery.penUpOnly()
+		}
+	}()
+	if err := robot.MoveProgramXYTo(ctx, x, y, machine.ProgramRapid); err != nil {
 		return err
 	}
 
 	fmt.Printf("\r\nStep 2 of 2: starting-position calibration\r\n")
-	fmt.Printf("Arrow keys: move %.3f mm | U: pen up | D: pen down | Enter: save | Esc/Ctrl-C: cancel\r\n", step)
+	fmt.Printf("Arrow keys: move %.3f mm | U: pen up | D: pen down | Enter: set origin | Esc/Ctrl-C: cancel\r\n", step)
 	fmt.Printf("X%.3f Y%.3f | pen UP\r\n", x, y)
 	for {
-		key, err := readKey(os.Stdin)
+		key, err := readKey(input)
 		if err != nil {
 			return err
 		}
 		switch key {
 		case keyEnter:
 			if penDown {
-				if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F300", cfg.PenUp)); err != nil {
+				if err := pen.Raise(ctx); err != nil {
 					return err
 				}
 			}
 			cfg.StartX, cfg.StartY = x, y
-			fmt.Printf("\r\nSelected start X%.3f Y%.3f; pen raised.\r\n", x, y)
-			return nil
+			if err := robot.SetProgramXYOrigin(ctx); err != nil {
+				return err
+			}
+			fmt.Printf("\r\nSelected start X%.3f Y%.3f; program origin set and pen raised.\r\n", x, y)
+			return calibrateDiagnosticsFrom(ctx, streamer, cfg, recovery, input)
 		case keyCancel:
 			return context.Canceled
 		case keyLeft:
@@ -226,14 +456,14 @@ func calibrateStartPosition(ctx context.Context, sender *grbl.Sender, cfg *confi
 		case keyDown:
 			y -= step
 		case keyPenUp:
-			if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F300", cfg.PenUp)); err != nil {
+			if err := pen.Raise(ctx); err != nil {
 				return err
 			}
 			penDown = false
 			fmt.Printf("\rX%.3f Y%.3f | pen UP     ", x, y)
 			continue
 		case keyPenDown:
-			if err := sender.Command(ctx, fmt.Sprintf("G1 Z%.3f F200", cfg.PenDown)); err != nil {
+			if err := pen.Lower(ctx); err != nil {
 				return err
 			}
 			penDown = true
@@ -249,11 +479,11 @@ func calibrateStartPosition(ctx context.Context, sender *grbl.Sender, cfg *confi
 		if y > 0 {
 			y = 0
 		}
-		move := "G0"
+		move := machine.ProgramRapid
 		if penDown {
-			move = "G1"
+			move = machine.ProgramLinear
 		}
-		if err := sender.Command(ctx, fmt.Sprintf("%s X%.3f Y%.3f", move, x, y)); err != nil {
+		if err := robot.MoveProgramXYTo(ctx, x, y, move); err != nil {
 			return err
 		}
 		state := "UP"
@@ -262,6 +492,73 @@ func calibrateStartPosition(ctx context.Context, sender *grbl.Sender, cfg *confi
 		}
 		fmt.Printf("\rX%.3f Y%.3f | pen %-4s   ", x, y, state)
 	}
+}
+
+func calibrateDiagnosticsFrom(ctx context.Context, streamer gcodeStreamer, cfg *config.Config, recovery *machineRecovery, input io.Reader) error {
+	for {
+		printDiagnosticMenu()
+		key, err := readKey(input)
+		if err != nil {
+			return err
+		}
+		if key == keyEnter {
+			fmt.Printf("\r\nDiagnostics complete.\r\n")
+			return nil
+		}
+		if key == keyCancel {
+			return context.Canceled
+		}
+
+		pattern, ok := diagnosticPattern(key)
+		if !ok {
+			continue
+		}
+		opts := diagnostics.DefaultOptions(cfg.PenUp, cfg.PenDown)
+		lines, err := pattern.Generate(opts)
+		if err != nil {
+			return fmt.Errorf("generate %s: %w", pattern.Name(), err)
+		}
+		fmt.Printf("\r\nDrawing %s...\r\n", pattern.Name())
+		if err := streamer.Send(ctx, lines); err != nil {
+			recoverAfterInterrupt(ctx, recovery, err)
+			return fmt.Errorf("draw %s: %w", pattern.Name(), err)
+		}
+		fmt.Printf("Finished %s; pen raised at program origin.\r\n", pattern.Name())
+	}
+}
+
+func printDiagnosticMenu() {
+	fmt.Printf("\r\nOptional diagnostics from calibrated program origin:\r\n")
+	labels := make([]string, 0, len(diagnosticChoices)+1)
+	for _, choice := range diagnosticChoices {
+		labels = append(labels, choice.label)
+	}
+	labels = append(labels, "Enter: save", "Esc/Ctrl-C: cancel")
+	fmt.Printf("%s\r\n", strings.Join(labels, " | "))
+}
+
+func diagnosticPattern(key key) (diagnostics.Pattern, bool) {
+	for _, choice := range diagnosticChoices {
+		if choice.key == key {
+			return choice.pattern, true
+		}
+	}
+	return nil, false
+}
+
+type diagnosticChoice struct {
+	key     key
+	label   string
+	pattern diagnostics.Pattern
+}
+
+var diagnosticChoices = []diagnosticChoice{
+	{key: keyPatternCircles, label: "C: circles", pattern: diagnostics.CirclePattern{}},
+	{key: keyPatternSquares, label: "S: squares", pattern: diagnostics.SquarePattern{}},
+	{key: keyPatternTriangles, label: "T: triangles", pattern: diagnostics.TrianglePattern{}},
+	{key: keyPatternSine, label: "V: sine waves", pattern: diagnostics.SinePattern{}},
+	{key: keyPatternGrid, label: "G: grid", pattern: diagnostics.GridPattern{}},
+	{key: keyPatternCrosshair, label: "X: crosshair", pattern: diagnostics.CrosshairPattern{}},
 }
 
 type key int
@@ -276,6 +573,12 @@ const (
 	keyRight
 	keyPenUp
 	keyPenDown
+	keyPatternCircles
+	keyPatternSquares
+	keyPatternTriangles
+	keyPatternSine
+	keyPatternGrid
+	keyPatternCrosshair
 )
 
 func readKey(r io.Reader) (key, error) {
@@ -292,6 +595,18 @@ func readKey(r io.Reader) (key, error) {
 		return keyPenUp, nil
 	case 'd', 'D':
 		return keyPenDown, nil
+	case 'c', 'C':
+		return keyPatternCircles, nil
+	case 's', 'S':
+		return keyPatternSquares, nil
+	case 't', 'T':
+		return keyPatternTriangles, nil
+	case 'v', 'V':
+		return keyPatternSine, nil
+	case 'g', 'G':
+		return keyPatternGrid, nil
+	case 'x', 'X':
+		return keyPatternCrosshair, nil
 	case 27:
 		var seq [2]byte
 		if _, err := io.ReadFull(r, seq[:]); err != nil {
