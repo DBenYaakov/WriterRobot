@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Tests multiple disconnected strokes and pen-up travel between them. -->
+  <path d="M 10 10 L 30 10 M 50 20 L 70 20"/>
+</svg>

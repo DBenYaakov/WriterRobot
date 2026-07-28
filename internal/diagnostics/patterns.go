@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
 )
@@ -145,49 +146,31 @@ func (CrosshairPattern) Generate(opts Options) ([]gcode.Line, error) {
 
 func generateStrokes(strokes []stroke, opts Options) ([]gcode.Line, error) {
 	opts = opts.withDefaults()
-	if err := validateOptions(opts); err != nil {
-		return nil, err
-	}
 	if len(strokes) == 0 {
 		return nil, errors.New("pattern contains no strokes")
 	}
 
-	var commands []string
-	appendCommand := func(format string, args ...any) {
-		commands = append(commands, fmt.Sprintf(format, args...))
-	}
-
-	appendCommand("G1 Z%.3f F%s", opts.PenUpZ, formatFeed(opts.PenRaiseFeed))
+	drawingStrokes := make([]drawing.Stroke, 0, len(strokes))
 	for i, s := range strokes {
 		if len(s) < 2 {
 			return nil, fmt.Errorf("stroke %d contains fewer than two points", i+1)
 		}
+		points := make([]drawing.Point, 0, len(s))
 		for _, p := range s {
-			if err := validatePoint(p); err != nil {
-				return nil, fmt.Errorf("stroke %d: %w", i+1, err)
-			}
+			points = append(points, drawing.Point{X: p.x, Y: p.y})
 		}
-
-		start := s[0]
-		appendCommand("G0 X%.3f Y%.3f", start.x, start.y)
-		appendCommand("G1 Z%.3f F%s", opts.PenDownZ, formatFeed(opts.PenLowerFeed))
-		for j, p := range s[1:] {
-			if j == 0 {
-				appendCommand("G1 X%.3f Y%.3f F%s", p.x, p.y, formatFeed(opts.DrawFeed))
-			} else {
-				appendCommand("G1 X%.3f Y%.3f", p.x, p.y)
-			}
-		}
-		appendCommand("G1 Z%.3f F%s", opts.PenUpZ, formatFeed(opts.PenRaiseFeed))
+		drawingStrokes = append(drawingStrokes, drawing.Stroke{Points: points})
 	}
-	appendCommand("G0 X0.000 Y0.000")
-	appendCommand("G1 Z%.3f F%s", opts.PenUpZ, formatFeed(opts.PenRaiseFeed))
 
-	lines := make([]gcode.Line, 0, len(commands))
-	for i, command := range commands {
-		lines = append(lines, gcode.Line{Number: i + 1, Command: command})
+	d, err := drawing.New(drawingStrokes)
+	if err != nil {
+		return nil, err
 	}
-	return lines, nil
+	gcodeOpts := drawing.DefaultOptions(opts.PenUpZ, opts.PenDownZ)
+	gcodeOpts.PenRaiseFeed = opts.PenRaiseFeed
+	gcodeOpts.PenLowerFeed = opts.PenLowerFeed
+	gcodeOpts.DrawFeed = opts.DrawFeed
+	return drawing.GenerateGCode(d, gcodeOpts)
 }
 
 func (opts Options) withDefaults() Options {
@@ -201,26 +184,6 @@ func (opts Options) withDefaults() Options {
 		opts.DrawFeed = defaultDrawFeed
 	}
 	return opts
-}
-
-func validateOptions(opts Options) error {
-	if !isFinite(opts.PenUpZ) || !isFinite(opts.PenDownZ) {
-		return errors.New("pen Z positions must be finite")
-	}
-	if opts.PenRaiseFeed <= 0 || opts.PenLowerFeed <= 0 || opts.DrawFeed <= 0 {
-		return errors.New("feed rates must be greater than zero")
-	}
-	return nil
-}
-
-func validatePoint(p point) error {
-	if !isFinite(p.x) || !isFinite(p.y) {
-		return fmt.Errorf("non-finite point X%.3f Y%.3f", p.x, p.y)
-	}
-	if p.x < -0.001 || p.x > 100 || p.y > 0.001 || p.y < -100 {
-		return fmt.Errorf("point X%.3f Y%.3f outside diagnostic work area", p.x, p.y)
-	}
-	return nil
 }
 
 func circle(center point, radius float64, segments int) stroke {
@@ -266,15 +229,4 @@ func sineWave(startX, endX, centerY, amplitude, wavelength float64, segments int
 		result = append(result, point{x: x, y: y})
 	}
 	return result
-}
-
-func formatFeed(feed float64) string {
-	if math.Abs(feed-math.Round(feed)) < 0.0005 {
-		return fmt.Sprintf("%.0f", feed)
-	}
-	return fmt.Sprintf("%.3f", feed)
-}
-
-func isFinite(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }

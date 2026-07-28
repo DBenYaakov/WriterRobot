@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Tests a simple translate and scale transform. -->
+  <g transform="translate(10 20) scale(2)">
+    <line x1="0" y1="0" x2="5" y2="0"/>
+  </g>
+</svg>

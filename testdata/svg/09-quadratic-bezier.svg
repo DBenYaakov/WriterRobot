@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Tests quadratic Bezier path flattening with Q and smooth T. -->
+  <path d="M 10 50 Q 30 20 50 50 T 90 50"/>
+</svg>

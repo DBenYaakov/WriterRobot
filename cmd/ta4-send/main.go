@@ -16,10 +16,12 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/config"
 	"github.com/DBenYaakov/WriterRobot/internal/console"
 	"github.com/DBenYaakov/WriterRobot/internal/diagnostics"
+	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
 	"github.com/DBenYaakov/WriterRobot/internal/session"
+	svgimport "github.com/DBenYaakov/WriterRobot/internal/svg"
 	"go.bug.st/serial"
 	"golang.org/x/term"
 )
@@ -40,16 +42,30 @@ func run() int {
 		calibrateMode   = flag.Bool("calibrate", false, "interactively calibrate pen height and starting position")
 		calibrationStep = flag.Float64("calibration-step", 0.05, "Z movement in millimeters for each pen-calibration arrow press")
 		positionStep    = flag.Float64("position-step", 1.0, "X/Y movement in millimeters for each position-calibration arrow press")
+		svgPath         = flag.String("svg", "", "local SVG file to import and plot")
+		svgTolerance    = flag.Float64("svg-tolerance", 0.10, "SVG curve flattening tolerance in SVG units")
+		svgFitWidth     = flag.Float64("svg-fit-width", 0, "fit imported SVG to this width in millimeters; 0 preserves source size")
+		svgFitHeight    = flag.Float64("svg-fit-height", 0, "fit imported SVG to this height in millimeters; 0 preserves source size")
+		svgAnchor       = flag.String("svg-anchor", "top-left", "SVG placement anchor: top-left or center")
+		workWidth       = flag.Float64("work-width", 100, "maximum drawable width in millimeters")
+		workHeight      = flag.Float64("work-height", 100, "maximum drawable height in millimeters")
+		drawFeed        = flag.Float64("draw-feed", 600, "drawing feed rate in millimeters per minute")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options] file.gcode\n       %s --port DEVICE --calibrate\n\n", os.Args[0], os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options] file.gcode\n       %s [options] --svg drawing.svg\n       %s --port DEVICE --calibrate\n\n", os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
 	log := console.New(os.Stdout)
+	svgMode := *svgPath != ""
 
 	if *calibrateMode {
+		if flag.NArg() != 0 || svgMode {
+			flag.Usage()
+			return 2
+		}
+	} else if svgMode {
 		if flag.NArg() != 0 {
 			flag.Usage()
 			return 2
@@ -62,6 +78,33 @@ func run() int {
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
 		return fail(log, "load configuration", err)
+	}
+
+	var lines []gcode.Line
+	var inputDescription string
+	if !*calibrateMode {
+		if svgMode {
+			var bounds drawing.Bounds
+			lines, bounds, err = loadSVGProgram(*svgPath, cfg, svgProgramOptions{
+				tolerance:  *svgTolerance,
+				fitWidth:   *svgFitWidth,
+				fitHeight:  *svgFitHeight,
+				anchor:     *svgAnchor,
+				workWidth:  *workWidth,
+				workHeight: *workHeight,
+				drawFeed:   *drawFeed,
+			})
+			if err != nil {
+				return fail(log, "prepare SVG", err)
+			}
+			inputDescription = fmt.Sprintf("SVG %s (bounds X%.3f..%.3f Y%.3f..%.3f)", *svgPath, bounds.MinX, bounds.MaxX, bounds.MinY, bounds.MaxY)
+		} else {
+			lines, err = loadGCodeProgram(flag.Arg(0), cfg)
+			if err != nil {
+				return fail(log, "prepare G-code", err)
+			}
+			inputDescription = flag.Arg(0)
+		}
 	}
 
 	mode := &serial.Mode{BaudRate: *baud}
@@ -101,27 +144,8 @@ func run() int {
 		return 0
 	}
 
-	file, err := os.Open(flag.Arg(0))
-	if err != nil {
-		return fail(log, "open G-code", err)
-	}
-	defer file.Close()
-	lines, err := gcode.Read(file)
-	if err != nil {
-		return fail(log, "parse G-code", err)
-	}
-	if len(lines) == 0 {
-		return fail(log, "parse G-code", errors.New("file contains no commands"))
-	}
-	for i := range lines {
-		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{PEN_DOWN}}", fmt.Sprintf("%.3f", cfg.PenDown))
-		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{PEN_UP}}", fmt.Sprintf("%.3f", cfg.PenUp))
-		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{START_X}}", fmt.Sprintf("%.3f", cfg.StartX))
-		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{START_Y}}", fmt.Sprintf("%.3f", cfg.StartY))
-	}
-
 	log.Info(fmt.Sprintf("Using configuration %s (pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f)", cfgPath, cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY))
-	log.Info(fmt.Sprintf("Sending %d commands to %s at %d baud", len(lines), *portName, *baud))
+	log.Info(fmt.Sprintf("Sending %d commands from %s to %s at %d baud", len(lines), inputDescription, *portName, *baud))
 	if err := sender.Initialize(ctx); err != nil {
 		recoverAfterInterrupt(ctx, recovery, err)
 		return fail(log, "initialize GRBL", err)
@@ -149,6 +173,73 @@ func run() int {
 	log.Info("Session ended; temporary program origin cleared.")
 	log.Info("Done.")
 	return 0
+}
+
+type svgProgramOptions struct {
+	tolerance  float64
+	fitWidth   float64
+	fitHeight  float64
+	anchor     string
+	workWidth  float64
+	workHeight float64
+	drawFeed   float64
+}
+
+func loadGCodeProgram(path string, cfg config.Config) ([]gcode.Line, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open G-code: %w", err)
+	}
+	defer file.Close()
+
+	lines, err := gcode.Read(file)
+	if err != nil {
+		return nil, fmt.Errorf("parse G-code: %w", err)
+	}
+	if len(lines) == 0 {
+		return nil, errors.New("parse G-code: file contains no commands")
+	}
+	for i := range lines {
+		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{PEN_DOWN}}", fmt.Sprintf("%.3f", cfg.PenDown))
+		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{PEN_UP}}", fmt.Sprintf("%.3f", cfg.PenUp))
+		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{START_X}}", fmt.Sprintf("%.3f", cfg.StartX))
+		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{START_Y}}", fmt.Sprintf("%.3f", cfg.StartY))
+	}
+	return lines, nil
+}
+
+func loadSVGProgram(path string, cfg config.Config, opts svgProgramOptions) ([]gcode.Line, drawing.Bounds, error) {
+	if opts.tolerance <= 0 {
+		return nil, drawing.Bounds{}, errors.New("SVG tolerance must be greater than zero")
+	}
+	if opts.workWidth <= 0 || opts.workHeight <= 0 {
+		return nil, drawing.Bounds{}, errors.New("work width and height must be greater than zero")
+	}
+	if opts.drawFeed <= 0 {
+		return nil, drawing.Bounds{}, errors.New("draw feed must be greater than zero")
+	}
+
+	svgOpts := svgimport.DefaultOptions()
+	svgOpts.FlattenTolerance = opts.tolerance
+	svgOpts.FitWidth = opts.fitWidth
+	svgOpts.FitHeight = opts.fitHeight
+	svgOpts.Anchor = svgimport.Anchor(opts.anchor)
+	d, err := svgimport.ParseFile(path, svgOpts)
+	if err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+
+	gcodeOpts := drawing.DefaultOptions(cfg.PenUp, cfg.PenDown)
+	gcodeOpts.DrawFeed = opts.drawFeed
+	gcodeOpts.WorkBounds = drawing.WorkBounds(opts.workWidth, opts.workHeight)
+	if err := drawing.Preflight(d, gcodeOpts.WorkBounds); err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+	lines, err := drawing.GenerateGCode(d, gcodeOpts)
+	if err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+	return lines, d.Bounds, nil
 }
 
 type recoveryTimings struct {

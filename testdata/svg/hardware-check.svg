@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 60">
+  <!-- Standard hardware check: rectangle, circle, triangle, cubic curve, and disconnected strokes. Overall geometry bounds are 70 mm by 50 mm at default scale. -->
+  <rect x="5" y="5" width="20" height="15"/>
+  <circle cx="45" cy="13" r="8"/>
+  <path d="M 60 22 L 75 22 L 67.5 5 Z"/>
+  <path d="M 8 45 C 20 25 35 65 48 42"/>
+  <path d="M 55 45 L 75 45 M 55 55 L 75 55"/>
+</svg>

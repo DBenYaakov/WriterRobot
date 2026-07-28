@@ -82,6 +82,49 @@ G4 P0.300
 
 The sender stops on `error:` or `ALARM:` and polls until the machine reports `Idle` after the last command.
 
+## Plot an SVG
+
+`ta4-send` can import a local SVG directly:
+
+```bash
+./.build/ta4-send \
+  --port /dev/cu.usbmodem201912341 \
+  --svg drawing.svg
+```
+
+Supported SVG geometry is `path`, `line`, `polyline`, `polygon`, `rect`, `circle`, and `ellipse`. Path import supports `M`, `L`, `H`, `V`, `C`, `S`, `Q`, `T`, and `Z`, including relative lowercase forms. Curves are flattened into line segments before streaming to GRBL.
+
+Useful sizing options:
+
+```bash
+./.build/ta4-send \
+  --port /dev/cu.usbmodem201912341 \
+  --svg drawing.svg \
+  --svg-fit-width 80 \
+  --work-width 100 \
+  --work-height 100
+```
+
+SVG coordinates are transformed into WriterRobot program coordinates with X increasing right and Y increasing downward on paper as negative program Y. By default, the imported SVG's top-left source corner is placed at the calibrated paper origin. The sender preflights the imported bounds before homing or moving the machine and rejects unsupported SVG features, malformed coordinates, empty geometry, and drawings outside the configured work area.
+
+## SVG fixture suite
+
+Checked-in SVG fixtures live in `testdata/svg/`. The numbered files each isolate one parser or transformation behavior: lines, rectangles, circles, ellipses, polylines, polygons, closed paths, relative paths, cubic and quadratic Bezier flattening, multiple disconnected strokes, transforms, nested transforms, viewBox scaling, and a small signature-like drawing. Invalid and unsupported fixtures in the same directory exercise malformed XML, malformed path data, non-finite coordinates, empty SVGs, text, images, and clip paths.
+
+The standard manual SVG hardware check is:
+
+```bash
+./.build/ta4-send \
+  --port /dev/cu.usbmodem201912341 \
+  --svg testdata/svg/hardware-check.svg \
+  --work-width 100 \
+  --work-height 100
+```
+
+`hardware-check.svg` contains one rectangle, one circle, one triangle, one cubic Bezier curve, and disconnected paths. Its default plotted geometry bounds are 70 mm wide by 50 mm tall.
+
+For incremental hardware validation, plot these fixtures in order: `02-rectangle.svg`, `03-circle.svg`, `07-triangle.svg`, `08-cubic-bezier.svg`, `12-multiple-strokes.svg`, `16-simple-signature.svg`, then `hardware-check.svg`.
+
 ## Safety
 
 The robot moves to its upper-left home position immediately after initialization. Keep the travel path clear and keep a hand near the power switch during calibration and early tests. Lower the pen in small increments to avoid forcing the mechanism into the paper.

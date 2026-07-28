@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -215,6 +216,88 @@ func TestPaperOriginSessionCommandsRemainOrdered(t *testing.T) {
 	}
 }
 
+func TestLoadSVGProgramGeneratesSafePlotterMotion(t *testing.T) {
+	path := svgFixturePath("01-line.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	lines, bounds, err := loadSVGProgram(path, cfg, svgProgramOptions{
+		tolerance:  0.1,
+		workWidth:  100,
+		workHeight: 100,
+		drawFeed:   600,
+	})
+	if err != nil {
+		t.Fatalf("loadSVGProgram: %v", err)
+	}
+	if bounds.MinX != 10 || bounds.MaxX != 30 || bounds.MinY != -40 || bounds.MaxY != -20 {
+		t.Fatalf("bounds = %+v, want X10..30 Y-40..-20", bounds)
+	}
+	want := []string{
+		"G1 Z0.500 F300",
+		"G0 X10.000 Y-20.000",
+		"G1 Z1.700 F200",
+		"G1 X30.000 Y-40.000 F600",
+		"G1 Z0.500 F300",
+		"G0 X0.000 Y0.000",
+		"G1 Z0.500 F300",
+	}
+	got := make([]string, 0, len(lines))
+	for _, line := range lines {
+		got = append(got, line.Command)
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+}
+
+func TestLoadSVGProgramRejectsOutOfBoundsBeforeStreaming(t *testing.T) {
+	path := svgFixturePath("12-multiple-strokes.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	lines, _, err := loadSVGProgram(path, cfg, svgProgramOptions{
+		tolerance:  0.1,
+		workWidth:  50,
+		workHeight: 100,
+		drawFeed:   600,
+	})
+	if err == nil {
+		t.Fatal("loadSVGProgram succeeded, want bounds error")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("lines generated for rejected SVG: %v", lines)
+	}
+	if !strings.Contains(err.Error(), "exceed work bounds") {
+		t.Fatalf("error = %v, want bounds context", err)
+	}
+}
+
+func TestLoadSVGProgramRejectsUnsupportedSVG(t *testing.T) {
+	path := svgFixturePath("unsupported-text.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	lines, _, err := loadSVGProgram(path, cfg, svgProgramOptions{
+		tolerance:  0.1,
+		workWidth:  100,
+		workHeight: 100,
+		drawFeed:   600,
+	})
+	if err == nil {
+		t.Fatal("loadSVGProgram succeeded, want unsupported SVG error")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("lines generated for unsupported SVG: %v", lines)
+	}
+}
+
+func TestLoadSVGProgramRejectsInvalidOptions(t *testing.T) {
+	path := svgFixturePath("01-line.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	if _, _, err := loadSVGProgram(path, cfg, svgProgramOptions{tolerance: 0, workWidth: 100, workHeight: 100, drawFeed: 600}); err == nil {
+		t.Fatal("loadSVGProgram succeeded with zero tolerance")
+	}
+}
+
 func TestPenUpCleanupSuccess(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
@@ -347,6 +430,10 @@ func testMachine(sender *grbl.Sender) (*machine.Machine, *session.Session, *mach
 
 func testLogger() console.Logger {
 	return console.New(io.Discard)
+}
+
+func svgFixturePath(file string) string {
+	return filepath.Join("..", "..", "testdata", "svg", file)
 }
 
 type commandRecorder struct {
