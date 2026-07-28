@@ -9,25 +9,34 @@ import (
 )
 
 const (
-	DefaultPenUp   = 0.50
-	DefaultPenDown = 1.70
-	DefaultStartX  = 0.0
-	DefaultStartY  = 0.0
+	DefaultPenUp                  = 0.50
+	DefaultPenDown                = 1.70
+	DefaultStartX                 = 0.0
+	DefaultStartY                 = 0.0
+	DefaultMachineHomeX           = 0.0
+	DefaultMachineHomeY           = 0.0
+	DefaultReturnHomeOnCompletion = true
 )
 
 type Config struct {
-	PenUp   float64 `json:"pen_up"`
-	PenDown float64 `json:"pen_down"`
-	StartX  float64 `json:"start_x"`
-	StartY  float64 `json:"start_y"`
+	PenUp                  float64 `json:"pen_up"`
+	PenDown                float64 `json:"pen_down"`
+	StartX                 float64 `json:"start_x"`
+	StartY                 float64 `json:"start_y"`
+	MachineHomeX           float64 `json:"machine_home_x"`
+	MachineHomeY           float64 `json:"machine_home_y"`
+	ReturnHomeOnCompletion bool    `json:"return_home_on_completion"`
 }
 
 func Default() Config {
 	return Config{
-		PenUp:   DefaultPenUp,
-		PenDown: DefaultPenDown,
-		StartX:  DefaultStartX,
-		StartY:  DefaultStartY,
+		PenUp:                  DefaultPenUp,
+		PenDown:                DefaultPenDown,
+		StartX:                 DefaultStartX,
+		StartY:                 DefaultStartY,
+		MachineHomeX:           DefaultMachineHomeX,
+		MachineHomeY:           DefaultMachineHomeY,
+		ReturnHomeOnCompletion: DefaultReturnHomeOnCompletion,
 	}
 }
 

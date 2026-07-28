@@ -18,6 +18,12 @@ type Commander interface {
 	Command(context.Context, string) error
 }
 
+// IdleWaiter is implemented by command transports that can confirm all queued
+// motion has completed.
+type IdleWaiter interface {
+	WaitIdle(context.Context) error
+}
+
 // ProgramMove selects the absolute program-coordinate X/Y move command.
 type ProgramMove string
 
@@ -109,6 +115,19 @@ func (m *Machine) MoveProgramXYTo(ctx context.Context, x, y float64, move Progra
 func (m *Machine) MoveMachineXYTo(ctx context.Context, x, y float64) error {
 	if err := m.commander.Command(ctx, fmt.Sprintf("G53 G0 X%.3f Y%.3f", x, y)); err != nil {
 		return fmt.Errorf("move machine XY to X%.3f Y%.3f: %w", x, y, err)
+	}
+	return nil
+}
+
+// WaitIdle waits until the underlying transport reports that queued motion has
+// completed. Transports without status support are treated as already idle.
+func (m *Machine) WaitIdle(ctx context.Context) error {
+	waiter, ok := m.commander.(IdleWaiter)
+	if !ok {
+		return nil
+	}
+	if err := waiter.WaitIdle(ctx); err != nil {
+		return fmt.Errorf("wait for machine idle: %w", err)
 	}
 	return nil
 }

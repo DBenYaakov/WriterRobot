@@ -79,6 +79,90 @@ func TestEndClearsProgramOffsetAndRestoresModalState(t *testing.T) {
 	)
 }
 
+func TestEndReturnsHomeAfterSuccessfulSession(t *testing.T) {
+	rec := &recordingCommander{}
+	drawingSession := New(machine.New(rec), Options{
+		End: homeEndOptions(),
+	})
+
+	if err := drawingSession.End(context.Background()); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	assertCommands(t, rec,
+		"G92.1",
+		"G21",
+		"G90",
+		"G17",
+		"G94",
+		"G54",
+		"G1 Z0.500 F300",
+		"G53 G0 X1.250 Y-2.500",
+	)
+	if rec.idleWaits != 1 {
+		t.Fatalf("idle waits = %d, want 1", rec.idleWaits)
+	}
+}
+
+func TestEndRaisesPenBeforeReturnHome(t *testing.T) {
+	rec := &recordingCommander{}
+	drawingSession := New(machine.New(rec), Options{
+		End: homeEndOptions(),
+	})
+
+	if err := drawingSession.End(context.Background()); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	penUpIndex := indexCommand(rec.commands, "G1 Z0.500 F300")
+	homeIndex := indexCommand(rec.commands, "G53 G0 X1.250 Y-2.500")
+	if penUpIndex < 0 || homeIndex < 0 {
+		t.Fatalf("commands missing pen-up or home move: %v", rec.commands)
+	}
+	if penUpIndex > homeIndex {
+		t.Fatalf("pen-up index = %d, home index = %d, want pen-up first", penUpIndex, homeIndex)
+	}
+}
+
+func TestEndReturnsHomeOnlyOnce(t *testing.T) {
+	rec := &recordingCommander{}
+	drawingSession := New(machine.New(rec), Options{
+		End: homeEndOptions(),
+	})
+
+	if err := drawingSession.End(context.Background()); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if got := countCommand(rec.commands, "G53 G0 X1.250 Y-2.500"); got != 1 {
+		t.Fatalf("home return count = %d, want 1", got)
+	}
+}
+
+func TestEndSkipsHomeReturnWhenDisabled(t *testing.T) {
+	rec := &recordingCommander{}
+	drawingSession := New(machine.New(rec), Options{
+		End: EndOptions{
+			PenUpZ:                 0.5,
+			ReturnHomeOnCompletion: false,
+			MachineHomeX:           1.25,
+			MachineHomeY:           -2.5,
+		},
+	})
+
+	if err := drawingSession.End(context.Background()); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	assertCommands(t, rec,
+		"G92.1",
+		"G21",
+		"G90",
+		"G17",
+		"G94",
+		"G54",
+	)
+	if rec.idleWaits != 0 {
+		t.Fatalf("idle waits = %d, want 0", rec.idleWaits)
+	}
+}
+
 func TestPrepareInterruptedRecoveryRestoresStateAndClearsOffset(t *testing.T) {
 	rec := &recordingCommander{}
 	drawingSession := New(machine.New(rec))
@@ -94,6 +178,23 @@ func TestPrepareInterruptedRecoveryRestoresStateAndClearsOffset(t *testing.T) {
 		"G54",
 		"G92.1",
 	)
+}
+
+func TestPrepareInterruptedRecoveryDoesNotReturnHome(t *testing.T) {
+	rec := &recordingCommander{}
+	drawingSession := New(machine.New(rec), Options{
+		End: homeEndOptions(),
+	})
+
+	if err := drawingSession.PrepareInterruptedRecovery(context.Background()); err != nil {
+		t.Fatalf("PrepareInterruptedRecovery: %v", err)
+	}
+	if countCommand(rec.commands, "G53 G0 X1.250 Y-2.500") != 0 {
+		t.Fatalf("recovery returned home: %v", rec.commands)
+	}
+	if countCommand(rec.commands, "G1 Z0.500 F300") != 0 {
+		t.Fatalf("recovery used normal completion pen-up: %v", rec.commands)
+	}
 }
 
 func TestBeginWrapsMachineErrors(t *testing.T) {
@@ -113,6 +214,7 @@ func TestBeginWrapsMachineErrors(t *testing.T) {
 type recordingCommander struct {
 	commands     []string
 	errByCommand map[string]error
+	idleWaits    int
 }
 
 func (r *recordingCommander) Command(_ context.Context, command string) error {
@@ -120,6 +222,11 @@ func (r *recordingCommander) Command(_ context.Context, command string) error {
 	if r.errByCommand != nil {
 		return r.errByCommand[command]
 	}
+	return nil
+}
+
+func (r *recordingCommander) WaitIdle(context.Context) error {
+	r.idleWaits++
 	return nil
 }
 
@@ -142,4 +249,24 @@ func indexCommand(commands []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func homeEndOptions() EndOptions {
+	return EndOptions{
+		PenUpZ:                 0.5,
+		PenRaiseFeed:           machine.DefaultPenRaiseFeed,
+		ReturnHomeOnCompletion: true,
+		MachineHomeX:           1.25,
+		MachineHomeY:           -2.5,
+	}
+}
+
+func countCommand(commands []string, want string) int {
+	count := 0
+	for _, command := range commands {
+		if command == want {
+			count++
+		}
+	}
+	return count
 }

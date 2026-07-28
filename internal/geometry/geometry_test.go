@@ -263,7 +263,7 @@ func TestProcessFitToWorkAreaFitsInkscapeSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	assertSafePenSequencing(t, ops, 29)
+	assertSafePenSequencing(t, ops, 25)
 }
 
 func TestProcessFitToWorkAreaPreflightsAfterFitting(t *testing.T) {

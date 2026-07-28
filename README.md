@@ -8,7 +8,8 @@ Open-source tools for controlling the Writing Robot T-A4 from macOS.
 
 - Controller: GRBL
 - Serial speed: 115200 baud
-- Home/origin: upper-left
+- Machine home: upper-left
+- Paper origin: calibrated per sheet
 - X+: right
 - Y-: down the paper
 - Default pen up: `Z0.50`
@@ -52,7 +53,7 @@ Escape or Ctrl-C cancels without saving. Example with finer increments:
   --calibration-step 0.01 --position-step 0.25
 ```
 
-The saved JSON configuration contains `pen_up`, `pen_down`, `start_x`, and `start_y`. G-code files may use `{{PEN_UP}}`, `{{PEN_DOWN}}`, `{{START_X}}`, and `{{START_Y}}` placeholders.
+The saved JSON configuration contains `pen_up`, `pen_down`, `start_x`, `start_y`, `machine_home_x`, `machine_home_y`, and `return_home_on_completion`. G-code files may use `{{PEN_UP}}`, `{{PEN_DOWN}}`, `{{START_X}}`, and `{{START_Y}}` placeholders.
 
 ## Configured pen positions in G-code
 
@@ -80,7 +81,7 @@ $H
 G4 P0.300
 ```
 
-The sender stops on `error:` or `ALARM:` and polls until the machine reports `Idle` after the last command.
+The sender stops on `error:` or `ALARM:` and polls until the machine reports `Idle` after the last drawing command. On normal completion, the session clears the temporary paper-origin offset, raises the pen, and returns to the configured machine home with a `G53` rapid move. The default configuration enables this return home behavior with machine home at `X0 Y0`; setting `return_home_on_completion` to `false` in the config keeps the machine at the drawing completion position.
 
 ## Plot an SVG
 
@@ -132,12 +133,12 @@ The SVG plotting path is deliberately layered:
 - `internal/svg` reads XML, parses supported SVG elements and path commands, and returns neutral source-coordinate vector geometry plus document metadata such as `viewBox`, width, and height.
 - `internal/drawing` defines neutral geometry types only. It does not know about SVG, G-code, GRBL, machine control, sessions, or CLI flags.
 - `internal/geometry` applies transforms, flattens curves, handles `viewBox` and SVG sizing, scales or fits geometry, inverts Y into WriterRobot program coordinates, computes bounds, and performs work-area preflight.
-- `internal/plot` turns processed drawings into ordered pen-up, rapid-move, pen-down, and drawing-move operations while preserving document order.
+- `internal/plot` turns processed drawings into ordered pen-up, rapid-move, pen-down, and drawing-move operations. It first merges already-contiguous open strokes, then uses a deterministic nearest-neighbor pass to choose the next stroke. Open strokes may be drawn in reverse when that endpoint is closer to the current pen position; equal-distance ties keep the original document order and original direction.
 - `internal/machine`, `internal/session`, and `internal/grbl` own machine command formatting, session lifecycle, and controller transport.
 
 ## Safety
 
-The robot moves to its upper-left home position immediately after initialization. Keep the travel path clear and keep a hand near the power switch during calibration and early tests. Lower the pen in small increments to avoid forcing the mechanism into the paper.
+The robot moves to its upper-left machine home position immediately after initialization and, by default, returns there after a successful plotting session. Keep the travel path clear and keep a hand near the power switch during calibration and early tests. Lower the pen in small increments to avoid forcing the mechanism into the paper.
 
 ## Generate the Bezier calibration pattern
 

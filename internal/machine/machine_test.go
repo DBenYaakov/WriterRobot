@@ -57,6 +57,18 @@ func TestMoveMachineXYToEmitsMachineCoordinateMove(t *testing.T) {
 	assertCommands(t, rec, "G53 G0 X10.125 Y-20.500")
 }
 
+func TestWaitIdleUsesCommanderWhenSupported(t *testing.T) {
+	rec := &recordingCommander{}
+	robot := New(rec)
+
+	if err := robot.WaitIdle(context.Background()); err != nil {
+		t.Fatalf("WaitIdle: %v", err)
+	}
+	if rec.idleWaits != 1 {
+		t.Fatalf("idle waits = %d, want 1", rec.idleWaits)
+	}
+}
+
 func TestSetProgramXYOriginEmitsG92(t *testing.T) {
 	rec := &recordingCommander{}
 	robot := New(rec)
@@ -218,13 +230,19 @@ func TestProgramFromPlanOmitsDrawFeedWhenPlannerLeavesItUnset(t *testing.T) {
 }
 
 type recordingCommander struct {
-	commands []string
-	err      error
+	commands  []string
+	err       error
+	idleWaits int
 }
 
 func (r *recordingCommander) Command(_ context.Context, command string) error {
 	r.commands = append(r.commands, command)
 	return r.err
+}
+
+func (r *recordingCommander) WaitIdle(context.Context) error {
+	r.idleWaits++
+	return nil
 }
 
 func assertCommands(t *testing.T, rec *recordingCommander, want ...string) {

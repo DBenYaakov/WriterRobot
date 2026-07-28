@@ -7,14 +7,18 @@
 // from calibrated machine coordinates, and clears it again after normal
 // completion.
 //
-// Normal completion leaves GRBL in millimeters, absolute positioning, XY plane,
-// units-per-minute feed mode, G54 selected, and no active G92 offset. The
-// session lifecycle intentionally does not erase persistent G54-G59 work offsets.
+// Normal plotting completion leaves the temporary G92 offset cleared and GRBL in
+// millimeters, absolute positioning, XY plane, units-per-minute feed mode, and
+// G54. When configured, normal completion also raises the pen and returns to the
+// configured machine home using G53 machine coordinates. Machine home is
+// distinct from the calibrated paper origin. The session lifecycle intentionally
+// does not erase persistent G54-G59 work offsets.
 package session
 
 import (
 	"context"
 	"fmt"
+	"math"
 )
 
 // Machine is the machine-command surface required for session lifecycle.
@@ -25,19 +29,40 @@ type Machine interface {
 	SetFeedRateUnitsPerMinute(context.Context) error
 	SelectDefaultWorkCoordinateSystem(context.Context) error
 	ClearProgramOffset(context.Context) error
+	MoveZTo(context.Context, float64, float64) error
 	MoveMachineXYTo(context.Context, float64, float64) error
+	WaitIdle(context.Context) error
 	SetProgramXYOrigin(context.Context) error
+}
+
+// EndOptions controls optional motion performed after successful drawing.
+type EndOptions struct {
+	PenUpZ                 float64
+	PenRaiseFeed           float64
+	ReturnHomeOnCompletion bool
+	MachineHomeX           float64
+	MachineHomeY           float64
+}
+
+// Options configures session lifecycle behavior.
+type Options struct {
+	End EndOptions
 }
 
 // Session owns the modal state and temporary coordinate-origin lifecycle for a
 // drawing session.
 type Session struct {
 	machine Machine
+	opts    Options
 }
 
 // New returns a session lifecycle wrapper around machine.
-func New(machine Machine) *Session {
-	return &Session{machine: machine}
+func New(machine Machine, options ...Options) *Session {
+	var opts Options
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	return &Session{machine: machine, opts: opts}
 }
 
 // EstablishModalState sets the GRBL parser modes that WriterRobot depends on.
@@ -77,14 +102,28 @@ func (s *Session) Begin(ctx context.Context, originX, originY float64) error {
 	return nil
 }
 
-// End clears the temporary program offset and restores the known modal state
-// after normal completion.
+// End clears the temporary program offset, restores the known modal state, and
+// performs configured completion motion after normal completion.
 func (s *Session) End(ctx context.Context) error {
+	if err := validateEndOptions(s.opts.End); err != nil {
+		return fmt.Errorf("end session: %w", err)
+	}
 	if err := s.machine.ClearProgramOffset(ctx); err != nil {
 		return fmt.Errorf("end session: clear program offset: %w", err)
 	}
 	if err := s.EstablishModalState(ctx); err != nil {
 		return fmt.Errorf("end session: %w", err)
+	}
+	if s.opts.End.ReturnHomeOnCompletion {
+		if err := s.machine.MoveZTo(ctx, s.opts.End.PenUpZ, s.opts.End.PenRaiseFeed); err != nil {
+			return fmt.Errorf("end session: raise pen before returning home: %w", err)
+		}
+		if err := s.machine.MoveMachineXYTo(ctx, s.opts.End.MachineHomeX, s.opts.End.MachineHomeY); err != nil {
+			return fmt.Errorf("end session: return to machine home: %w", err)
+		}
+		if err := s.machine.WaitIdle(ctx); err != nil {
+			return fmt.Errorf("end session: wait for machine home: %w", err)
+		}
 	}
 	return nil
 }
@@ -100,4 +139,24 @@ func (s *Session) PrepareInterruptedRecovery(ctx context.Context) error {
 		return fmt.Errorf("prepare interrupted recovery: clear program offset: %w", err)
 	}
 	return nil
+}
+
+func validateEndOptions(opts EndOptions) error {
+	if !opts.ReturnHomeOnCompletion {
+		return nil
+	}
+	if !isFinite(opts.PenUpZ) {
+		return fmt.Errorf("pen-up Z must be finite")
+	}
+	if opts.PenRaiseFeed <= 0 || !isFinite(opts.PenRaiseFeed) {
+		return fmt.Errorf("pen raise feed must be finite and greater than zero")
+	}
+	if !isFinite(opts.MachineHomeX) || !isFinite(opts.MachineHomeY) {
+		return fmt.Errorf("machine home coordinates must be finite")
+	}
+	return nil
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }

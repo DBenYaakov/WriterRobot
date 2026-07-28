@@ -45,7 +45,7 @@ func TestParseInkscapeSignatureFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	assertPlotPenSequencing(t, ops, 29)
+	assertPlotPenSequencing(t, ops, 25)
 	if _, err := machine.ProgramFromPlan(ops); err != nil {
 		t.Fatalf("ProgramFromPlan: %v", err)
 	}

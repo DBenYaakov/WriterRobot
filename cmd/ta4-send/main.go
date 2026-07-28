@@ -123,6 +123,17 @@ func run() int {
 	defer sender.Close()
 	robot := machine.New(sender)
 	drawingSession := session.New(robot)
+	if !*calibrateMode {
+		drawingSession = session.New(robot, session.Options{
+			End: session.EndOptions{
+				PenUpZ:                 cfg.PenUp,
+				PenRaiseFeed:           machine.DefaultPenRaiseFeed,
+				ReturnHomeOnCompletion: cfg.ReturnHomeOnCompletion,
+				MachineHomeX:           cfg.MachineHomeX,
+				MachineHomeY:           cfg.MachineHomeY,
+			},
+		})
+	}
 	pen := machine.NewPen(robot, cfg.PenUp, cfg.PenDown)
 	recovery := newMachineRecovery(sender, drawingSession, pen, log, defaultRecoveryTimings)
 
