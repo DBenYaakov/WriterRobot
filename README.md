@@ -109,7 +109,7 @@ SVG coordinates are transformed into WriterRobot program coordinates with X incr
 
 ## SVG fixture suite
 
-Checked-in SVG fixtures live in `testdata/svg/`. The numbered files each isolate one parser or transformation behavior: lines, rectangles, circles, ellipses, polylines, polygons, closed paths, relative paths, cubic and quadratic Bezier flattening, multiple disconnected strokes, transforms, nested transforms, viewBox scaling, and a small signature-like drawing. Invalid and unsupported fixtures in the same directory exercise malformed XML, malformed path data, non-finite coordinates, empty SVGs, text, images, and clip paths.
+Checked-in SVG fixtures live in `testdata/svg/`. The numbered files each isolate one SVG import or geometry-processing behavior: lines, rectangles, circles, ellipses, polylines, polygons, closed paths, relative paths, cubic and quadratic Bezier flattening, multiple disconnected strokes, transforms, nested transforms, viewBox scaling, and a small signature-like drawing. Invalid and unsupported fixtures in the same directory exercise malformed XML, malformed path data, non-finite coordinates, empty SVGs, text, images, and clip paths.
 
 The standard manual SVG hardware check is:
 
@@ -124,6 +124,16 @@ The standard manual SVG hardware check is:
 `hardware-check.svg` contains one rectangle, one circle, one triangle, one cubic Bezier curve, and disconnected paths. Its default plotted geometry bounds are 70 mm wide by 50 mm tall.
 
 For incremental hardware validation, plot these fixtures in order: `02-rectangle.svg`, `03-circle.svg`, `07-triangle.svg`, `08-cubic-bezier.svg`, `12-multiple-strokes.svg`, `16-simple-signature.svg`, then `hardware-check.svg`.
+
+## Internal plotting architecture
+
+The SVG plotting path is deliberately layered:
+
+- `internal/svg` reads XML, parses supported SVG elements and path commands, and returns neutral source-coordinate vector geometry plus document metadata such as `viewBox`, width, and height.
+- `internal/drawing` defines neutral geometry types only. It does not know about SVG, G-code, GRBL, machine control, sessions, or CLI flags.
+- `internal/geometry` applies transforms, flattens curves, handles `viewBox` and SVG sizing, scales or fits geometry, inverts Y into WriterRobot program coordinates, computes bounds, and performs work-area preflight.
+- `internal/plot` turns processed drawings into ordered pen-up, rapid-move, pen-down, and drawing-move operations while preserving document order.
+- `internal/machine`, `internal/session`, and `internal/grbl` own machine command formatting, session lifecycle, and controller transport.
 
 ## Safety
 

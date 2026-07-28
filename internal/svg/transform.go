@@ -10,51 +10,20 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 )
 
-type matrix struct {
-	a float64
-	b float64
-	c float64
-	d float64
-	e float64
-	f float64
+func translateTransform(tx, ty float64) drawing.Transform {
+	return drawing.Transform{A: 1, D: 1, E: tx, F: ty}
 }
 
-func identityMatrix() matrix {
-	return matrix{a: 1, d: 1}
+func scaleTransform(sx, sy float64) drawing.Transform {
+	return drawing.Transform{A: sx, D: sy}
 }
 
-func translateMatrix(tx, ty float64) matrix {
-	return matrix{a: 1, d: 1, e: tx, f: ty}
-}
-
-func scaleMatrix(sx, sy float64) matrix {
-	return matrix{a: sx, d: sy}
-}
-
-func multiply(parent, child matrix) matrix {
-	return matrix{
-		a: parent.a*child.a + parent.c*child.b,
-		b: parent.b*child.a + parent.d*child.b,
-		c: parent.a*child.c + parent.c*child.d,
-		d: parent.b*child.c + parent.d*child.d,
-		e: parent.a*child.e + parent.c*child.f + parent.e,
-		f: parent.b*child.e + parent.d*child.f + parent.f,
-	}
-}
-
-func (m matrix) apply(point drawing.Point) drawing.Point {
-	return drawing.Point{
-		X: m.a*point.X + m.c*point.Y + m.e,
-		Y: m.b*point.X + m.d*point.Y + m.f,
-	}
-}
-
-func parseTransform(value string) (matrix, error) {
+func parseTransform(value string) (drawing.Transform, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return identityMatrix(), nil
+		return drawing.IdentityTransform(), nil
 	}
-	result := identityMatrix()
+	result := drawing.IdentityTransform()
 	for value != "" {
 		value = strings.TrimLeftFunc(value, unicode.IsSpace)
 		if value == "" {
@@ -65,58 +34,58 @@ func parseTransform(value string) (matrix, error) {
 			nameEnd++
 		}
 		if nameEnd == 0 {
-			return matrix{}, fmt.Errorf("expected transform function in %q", value)
+			return drawing.Transform{}, fmt.Errorf("expected transform function in %q", value)
 		}
 		name := value[:nameEnd]
 		rest := strings.TrimLeftFunc(value[nameEnd:], unicode.IsSpace)
 		if !strings.HasPrefix(rest, "(") {
-			return matrix{}, fmt.Errorf("transform %s missing opening parenthesis", name)
+			return drawing.Transform{}, fmt.Errorf("transform %s missing opening parenthesis", name)
 		}
 		closeIndex := strings.IndexByte(rest, ')')
 		if closeIndex < 0 {
-			return matrix{}, fmt.Errorf("transform %s missing closing parenthesis", name)
+			return drawing.Transform{}, fmt.Errorf("transform %s missing closing parenthesis", name)
 		}
 		args, err := scanNumbers(rest[1:closeIndex])
 		if err != nil {
-			return matrix{}, fmt.Errorf("transform %s: %w", name, err)
+			return drawing.Transform{}, fmt.Errorf("transform %s: %w", name, err)
 		}
 		local, err := transformFunction(name, args)
 		if err != nil {
-			return matrix{}, err
+			return drawing.Transform{}, err
 		}
-		result = multiply(result, local)
+		result = result.Then(local)
 		value = strings.TrimSpace(rest[closeIndex+1:])
 	}
 	return result, nil
 }
 
-func transformFunction(name string, args []float64) (matrix, error) {
+func transformFunction(name string, args []float64) (drawing.Transform, error) {
 	switch name {
 	case "matrix":
 		if len(args) != 6 {
-			return matrix{}, errors.New("matrix transform requires six numbers")
+			return drawing.Transform{}, errors.New("matrix transform requires six numbers")
 		}
-		return matrix{a: args[0], b: args[1], c: args[2], d: args[3], e: args[4], f: args[5]}, nil
+		return drawing.Transform{A: args[0], B: args[1], C: args[2], D: args[3], E: args[4], F: args[5]}, nil
 	case "translate":
 		if len(args) != 1 && len(args) != 2 {
-			return matrix{}, errors.New("translate transform requires one or two numbers")
+			return drawing.Transform{}, errors.New("translate transform requires one or two numbers")
 		}
 		ty := 0.0
 		if len(args) == 2 {
 			ty = args[1]
 		}
-		return translateMatrix(args[0], ty), nil
+		return translateTransform(args[0], ty), nil
 	case "scale":
 		if len(args) != 1 && len(args) != 2 {
-			return matrix{}, errors.New("scale transform requires one or two numbers")
+			return drawing.Transform{}, errors.New("scale transform requires one or two numbers")
 		}
 		sy := args[0]
 		if len(args) == 2 {
 			sy = args[1]
 		}
-		return scaleMatrix(args[0], sy), nil
+		return scaleTransform(args[0], sy), nil
 	default:
-		return matrix{}, fmt.Errorf("unsupported transform %q", name)
+		return drawing.Transform{}, fmt.Errorf("unsupported transform %q", name)
 	}
 }
 

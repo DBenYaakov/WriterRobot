@@ -18,8 +18,10 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/diagnostics"
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
+	"github.com/DBenYaakov/WriterRobot/internal/geometry"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
+	"github.com/DBenYaakov/WriterRobot/internal/plot"
 	"github.com/DBenYaakov/WriterRobot/internal/session"
 	svgimport "github.com/DBenYaakov/WriterRobot/internal/svg"
 	"go.bug.st/serial"
@@ -219,27 +221,52 @@ func loadSVGProgram(path string, cfg config.Config, opts svgProgramOptions) ([]g
 		return nil, drawing.Bounds{}, errors.New("draw feed must be greater than zero")
 	}
 
-	svgOpts := svgimport.DefaultOptions()
-	svgOpts.FlattenTolerance = opts.tolerance
-	svgOpts.FitWidth = opts.fitWidth
-	svgOpts.FitHeight = opts.fitHeight
-	svgOpts.Anchor = svgimport.Anchor(opts.anchor)
-	d, err := svgimport.ParseFile(path, svgOpts)
+	doc, err := svgimport.ParseFile(path)
+	if err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+	geometryOpts := geometry.DefaultOptions()
+	geometryOpts.FlattenTolerance = opts.tolerance
+	geometryOpts.FitWidth = opts.fitWidth
+	geometryOpts.FitHeight = opts.fitHeight
+	geometryOpts.Anchor = geometry.Anchor(opts.anchor)
+	d, err := geometry.Process(svgGeometrySource(doc), geometryOpts)
 	if err != nil {
 		return nil, drawing.Bounds{}, err
 	}
 
-	gcodeOpts := drawing.DefaultOptions(cfg.PenUp, cfg.PenDown)
-	gcodeOpts.DrawFeed = opts.drawFeed
-	gcodeOpts.WorkBounds = drawing.WorkBounds(opts.workWidth, opts.workHeight)
-	if err := drawing.Preflight(d, gcodeOpts.WorkBounds); err != nil {
+	workBounds := geometry.WorkBounds(opts.workWidth, opts.workHeight)
+	if err := geometry.Preflight(d, workBounds); err != nil {
 		return nil, drawing.Bounds{}, err
 	}
-	lines, err := drawing.GenerateGCode(d, gcodeOpts)
+	plotOpts := plot.DefaultOptions(cfg.PenUp, cfg.PenDown)
+	plotOpts.DrawFeed = opts.drawFeed
+	ops, err := plot.Plan(d, plotOpts)
+	if err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+	lines, err := machine.ProgramFromPlan(ops)
 	if err != nil {
 		return nil, drawing.Bounds{}, err
 	}
 	return lines, d.Bounds, nil
+}
+
+func svgGeometrySource(doc svgimport.Document) geometry.Source {
+	source := geometry.Source{
+		Drawing: doc.Drawing,
+		Width:   doc.Width,
+		Height:  doc.Height,
+	}
+	if doc.ViewBox != nil {
+		source.ViewBox = &geometry.Rect{
+			MinX:   doc.ViewBox.MinX,
+			MinY:   doc.ViewBox.MinY,
+			Width:  doc.ViewBox.Width,
+			Height: doc.ViewBox.Height,
+		}
+	}
+	return source
 }
 
 type recoveryTimings struct {

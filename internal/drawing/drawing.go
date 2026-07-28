@@ -1,4 +1,8 @@
 // Package drawing defines neutral 2D drawing geometry.
+//
+// It contains no SVG, G-code, GRBL, machine, session, or CLI knowledge. SVG
+// parsing, geometric processing, plot planning, and machine-command generation
+// are separate layers that communicate through these geometry types.
 package drawing
 
 import (
@@ -13,7 +17,84 @@ type Point struct {
 	Y float64
 }
 
-// Stroke is one continuous pen-down drawing path.
+// Transform is a 2D affine transform matrix.
+type Transform struct {
+	A float64
+	B float64
+	C float64
+	D float64
+	E float64
+	F float64
+}
+
+// IdentityTransform returns the identity affine transform.
+func IdentityTransform() Transform {
+	return Transform{A: 1, D: 1}
+}
+
+// Apply returns point transformed by t.
+func (t Transform) Apply(point Point) Point {
+	return Point{
+		X: t.A*point.X + t.C*point.Y + t.E,
+		Y: t.B*point.X + t.D*point.Y + t.F,
+	}
+}
+
+// Then composes t with next using SVG-style inherited transform order.
+func (t Transform) Then(next Transform) Transform {
+	return Transform{
+		A: t.A*next.A + t.C*next.B,
+		B: t.B*next.A + t.D*next.B,
+		C: t.A*next.C + t.C*next.D,
+		D: t.B*next.C + t.D*next.D,
+		E: t.A*next.E + t.C*next.F + t.E,
+		F: t.B*next.E + t.D*next.F + t.F,
+	}
+}
+
+// SegmentKind identifies a vector path segment.
+type SegmentKind int
+
+const (
+	// SegmentLine is a straight line segment.
+	SegmentLine SegmentKind = iota
+	// SegmentCubic is a cubic Bezier segment.
+	SegmentCubic
+	// SegmentQuadratic is a quadratic Bezier segment.
+	SegmentQuadratic
+	// SegmentEllipse is a full ellipse segment.
+	SegmentEllipse
+)
+
+// Segment is one vector segment in a source-coordinate stroke.
+type Segment struct {
+	Kind SegmentKind
+
+	Start    Point
+	Control1 Point
+	Control2 Point
+	End      Point
+
+	Center  Point
+	RadiusX float64
+	RadiusY float64
+}
+
+// VectorStroke is one continuous source-coordinate path before geometric
+// processing such as transforms, curve flattening, scaling, or Y inversion.
+type VectorStroke struct {
+	Start     Point
+	Segments  []Segment
+	Closed    bool
+	Transform Transform
+}
+
+// VectorDrawing is an ordered set of source-coordinate vector strokes.
+type VectorDrawing struct {
+	Strokes []VectorStroke
+}
+
+// Stroke is one continuous pen-down polyline after geometric processing.
 type Stroke struct {
 	Points []Point
 	Closed bool
@@ -31,11 +112,6 @@ type Bounds struct {
 	MinY float64
 	MaxX float64
 	MaxY float64
-}
-
-// WorkBounds returns the normal upper-left-origin work area used by ta4-send.
-func WorkBounds(width, height float64) Bounds {
-	return Bounds{MinX: 0, MinY: -height, MaxX: width, MaxY: 0}
 }
 
 // New validates strokes and computes their bounds.
@@ -135,26 +211,6 @@ func (b Bounds) Contains(other Bounds) bool {
 		other.MaxY <= b.MaxY+epsilon
 }
 
-// Preflight verifies that a drawing is non-empty, finite, and inside limits.
-func Preflight(d Drawing, limits Bounds) error {
-	if len(d.Strokes) == 0 {
-		return errors.New("drawing contains no strokes")
-	}
-	bounds, err := ComputeBounds(d.Strokes)
-	if err != nil {
-		return err
-	}
-	if !sameBounds(bounds, d.Bounds) {
-		d.Bounds = bounds
-	}
-	if !limits.Contains(d.Bounds) {
-		return fmt.Errorf("drawing bounds X%.3f..%.3f Y%.3f..%.3f exceed work bounds X%.3f..%.3f Y%.3f..%.3f",
-			d.Bounds.MinX, d.Bounds.MaxX, d.Bounds.MinY, d.Bounds.MaxY,
-			limits.MinX, limits.MaxX, limits.MinY, limits.MaxY)
-	}
-	return nil
-}
-
 func finitePoint(point Point) bool {
 	return isFinite(point.X) && isFinite(point.Y)
 }
@@ -165,9 +221,4 @@ func isFinite(value float64) bool {
 
 func samePoint(a, b Point) bool {
 	return math.Abs(a.X-b.X) < 0.0005 && math.Abs(a.Y-b.Y) < 0.0005
-}
-
-func sameBounds(a, b Bounds) bool {
-	return samePoint(Point{X: a.MinX, Y: a.MinY}, Point{X: b.MinX, Y: b.MinY}) &&
-		samePoint(Point{X: a.MaxX, Y: a.MaxY}, Point{X: b.MaxX, Y: b.MaxY})
 }

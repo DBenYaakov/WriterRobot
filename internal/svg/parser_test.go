@@ -9,195 +9,154 @@ import (
 )
 
 func TestParseValidFixtureSuite(t *testing.T) {
-	tests := []fixtureCase{
-		{
-			file:        "01-line.svg",
-			strokes:     1,
-			closed:      []bool{false},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -40, MaxX: 30, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 30, Y: -40}},
-			exactPoints: []int{2},
-		},
-		{
-			file:        "02-rectangle.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -60, MaxX: 40, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 10, Y: -20}},
-			exactPoints: []int{5},
-		},
-		{
-			file:        "03-circle.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 20, MinY: -40, MaxX: 40, MaxY: -20},
-			starts:      []drawing.Point{{X: 40, Y: -30}},
-			ends:        []drawing.Point{{X: 40, Y: -30}},
-			exactPoints: []int{25},
-		},
-		{
-			file:        "04-ellipse.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 20, MinY: -45, MaxX: 60, MaxY: -25},
-			starts:      []drawing.Point{{X: 60, Y: -35}},
-			ends:        []drawing.Point{{X: 60, Y: -35}},
-			exactPoints: []int{33},
-		},
-		{
-			file:        "05-polyline.svg",
-			strokes:     1,
-			closed:      []bool{false},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -30, MaxX: 30, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 30, Y: -20}},
-			exactPoints: []int{3},
-		},
-		{
-			file:        "06-polygon.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -30, MaxX: 30, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 10, Y: -20}},
-			exactPoints: []int{4},
-		},
-		{
-			file:        "07-triangle.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -40, MaxX: 30, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -40}},
-			ends:        []drawing.Point{{X: 10, Y: -40}},
-			exactPoints: []int{4},
-		},
-		{
-			file:      "08-cubic-bezier.svg",
-			strokes:   1,
-			closed:    []bool{false},
-			bounds:    drawing.Bounds{MinX: 10, MinY: -50, MaxX: 50, MaxY: -27.5},
-			starts:    []drawing.Point{{X: 10, Y: -50}},
-			ends:      []drawing.Point{{X: 50, Y: -50}},
-			minPoints: []int{6},
-			flattened: true,
-		},
-		{
-			file:      "09-quadratic-bezier.svg",
-			strokes:   1,
-			closed:    []bool{false},
-			bounds:    drawing.Bounds{MinX: 10, MinY: -65, MaxX: 90, MaxY: -35},
-			starts:    []drawing.Point{{X: 10, Y: -50}},
-			ends:      []drawing.Point{{X: 90, Y: -50}},
-			minPoints: []int{6},
-			flattened: true,
-		},
-		{
-			file:        "10-relative-path.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -40, MaxX: 40, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 10, Y: -20}},
-			exactPoints: []int{6},
-		},
-		{
-			file:        "11-closed-path.svg",
-			strokes:     1,
-			closed:      []bool{true},
-			bounds:      drawing.Bounds{MinX: 15, MinY: -35, MaxX: 45, MaxY: -15},
-			starts:      []drawing.Point{{X: 15, Y: -15}},
-			ends:        []drawing.Point{{X: 15, Y: -15}},
-			exactPoints: []int{5},
-		},
-		{
-			file:        "12-multiple-strokes.svg",
-			strokes:     2,
-			closed:      []bool{false, false},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -20, MaxX: 70, MaxY: -10},
-			starts:      []drawing.Point{{X: 10, Y: -10}, {X: 50, Y: -20}},
-			ends:        []drawing.Point{{X: 30, Y: -10}, {X: 70, Y: -20}},
-			exactPoints: []int{2, 2},
-		},
-		{
-			file:        "13-transforms.svg",
-			strokes:     1,
-			closed:      []bool{false},
-			bounds:      drawing.Bounds{MinX: 10, MinY: -20, MaxX: 20, MaxY: -20},
-			starts:      []drawing.Point{{X: 10, Y: -20}},
-			ends:        []drawing.Point{{X: 20, Y: -20}},
-			exactPoints: []int{2},
-		},
-		{
-			file:        "14-viewbox-scale.svg",
-			strokes:     1,
-			closed:      []bool{false},
-			bounds:      drawing.Bounds{MinX: 0, MinY: -25, MaxX: 50, MaxY: 0},
-			starts:      []drawing.Point{{X: 0, Y: 0}},
-			ends:        []drawing.Point{{X: 50, Y: -25}},
-			exactPoints: []int{2},
-		},
-		{
-			file:        "15-nested-transforms.svg",
-			strokes:     1,
-			closed:      []bool{false},
-			bounds:      drawing.Bounds{MinX: 20, MinY: -20, MaxX: 40, MaxY: -20},
-			starts:      []drawing.Point{{X: 20, Y: -20}},
-			ends:        []drawing.Point{{X: 40, Y: -20}},
-			exactPoints: []int{2},
-		},
-		{
-			file:      "16-simple-signature.svg",
-			strokes:   2,
-			closed:    []bool{false, false},
-			bounds:    drawing.Bounds{MinX: 10, MinY: -31.406, MaxX: 91, MaxY: -15.156},
-			starts:    []drawing.Point{{X: 10, Y: -30}, {X: 75, Y: -30}},
-			ends:      []drawing.Point{{X: 70, Y: -30}, {X: 91, Y: -30}},
-			minPoints: []int{8, 4},
-			flattened: true,
-		},
-		{
-			file:      "hardware-check.svg",
-			strokes:   6,
-			closed:    []bool{true, true, true, false, false, false},
-			bounds:    drawing.Bounds{MinX: 5, MinY: -55, MaxX: 75, MaxY: -5},
-			starts:    []drawing.Point{{X: 5, Y: -5}, {X: 53, Y: -13}, {X: 60, Y: -22}, {X: 8, Y: -45}, {X: 55, Y: -45}, {X: 55, Y: -55}},
-			ends:      []drawing.Point{{X: 5, Y: -5}, {X: 53, Y: -13}, {X: 60, Y: -22}, {X: 48, Y: -42}, {X: 75, Y: -45}, {X: 75, Y: -55}},
-			minPoints: []int{5, 25, 4, 6, 2, 2},
-		},
+	tests := []struct {
+		file    string
+		strokes int
+		closed  []bool
+	}{
+		{file: "01-line.svg", strokes: 1, closed: []bool{false}},
+		{file: "02-rectangle.svg", strokes: 1, closed: []bool{true}},
+		{file: "03-circle.svg", strokes: 1, closed: []bool{true}},
+		{file: "04-ellipse.svg", strokes: 1, closed: []bool{true}},
+		{file: "05-polyline.svg", strokes: 1, closed: []bool{false}},
+		{file: "06-polygon.svg", strokes: 1, closed: []bool{true}},
+		{file: "07-triangle.svg", strokes: 1, closed: []bool{true}},
+		{file: "08-cubic-bezier.svg", strokes: 1, closed: []bool{false}},
+		{file: "09-quadratic-bezier.svg", strokes: 1, closed: []bool{false}},
+		{file: "10-relative-path.svg", strokes: 1, closed: []bool{true}},
+		{file: "11-closed-path.svg", strokes: 1, closed: []bool{true}},
+		{file: "12-multiple-strokes.svg", strokes: 2, closed: []bool{false, false}},
+		{file: "13-transforms.svg", strokes: 1, closed: []bool{false}},
+		{file: "14-viewbox-scale.svg", strokes: 1, closed: []bool{false}},
+		{file: "15-nested-transforms.svg", strokes: 1, closed: []bool{false}},
+		{file: "16-simple-signature.svg", strokes: 2, closed: []bool{false, false}},
+		{file: "hardware-check.svg", strokes: 6, closed: []bool{true, true, true, false, false, false}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
-			d, err := ParseFile(fixturePath(tt.file), DefaultOptions())
+			doc, err := ParseFile(fixturePath(tt.file))
 			if err != nil {
 				t.Fatalf("ParseFile: %v", err)
 			}
-			assertFixture(t, d, tt)
-			assertGeneratedGCodePenSequencing(t, d)
+			if len(doc.Drawing.Strokes) != tt.strokes {
+				t.Fatalf("strokes = %d, want %d", len(doc.Drawing.Strokes), tt.strokes)
+			}
+			for i, stroke := range doc.Drawing.Strokes {
+				if stroke.Closed != tt.closed[i] {
+					t.Fatalf("stroke %d closed = %v, want %v", i+1, stroke.Closed, tt.closed[i])
+				}
+				if len(stroke.Segments) == 0 {
+					t.Fatalf("stroke %d has no segments", i+1)
+				}
+			}
 		})
 	}
 }
 
-func TestParseFixtureFitWidthPreservesAspectRatio(t *testing.T) {
-	opts := DefaultOptions()
-	opts.FitWidth = 40
-	d, err := ParseFile(fixturePath("14-viewbox-scale.svg"), opts)
-	if err != nil {
-		t.Fatalf("ParseFile: %v", err)
-	}
-	assertBounds(t, d.Bounds, drawing.Bounds{MinX: 0, MinY: -20, MaxX: 40, MaxY: 0})
+func TestParseLineAndPolylinePointOrder(t *testing.T) {
+	doc := mustParseFixture(t, "05-polyline.svg")
+	stroke := doc.Drawing.Strokes[0]
+
+	assertPoint(t, stroke.Start, drawing.Point{X: 10, Y: 20}, "start")
+	assertSegment(t, stroke.Segments[0], drawing.SegmentLine, drawing.Point{X: 10, Y: 20}, drawing.Point{X: 20, Y: 30})
+	assertSegment(t, stroke.Segments[1], drawing.SegmentLine, drawing.Point{X: 20, Y: 30}, drawing.Point{X: 30, Y: 20})
 }
 
-func TestParseFixtureCenterAnchor(t *testing.T) {
-	opts := DefaultOptions()
-	opts.Anchor = AnchorCenter
-	d, err := ParseFile(fixturePath("01-line.svg"), opts)
-	if err != nil {
-		t.Fatalf("ParseFile: %v", err)
+func TestParseRectCircleEllipseAndPolygonGeometry(t *testing.T) {
+	rect := mustParseFixture(t, "02-rectangle.svg").Drawing.Strokes[0]
+	if !rect.Closed {
+		t.Fatal("rect is open, want closed")
 	}
-	assertBounds(t, d.Bounds, drawing.Bounds{MinX: -40, MinY: 10, MaxX: -20, MaxY: 30})
+	assertPoint(t, rect.Start, drawing.Point{X: 10, Y: 20}, "rect start")
+	assertSegment(t, rect.Segments[2], drawing.SegmentLine, drawing.Point{X: 40, Y: 60}, drawing.Point{X: 10, Y: 60})
+
+	circle := mustParseFixture(t, "03-circle.svg").Drawing.Strokes[0]
+	if len(circle.Segments) != 1 || circle.Segments[0].Kind != drawing.SegmentEllipse {
+		t.Fatalf("circle segment = %+v, want one ellipse segment", circle.Segments)
+	}
+	assertPoint(t, circle.Start, drawing.Point{X: 40, Y: 30}, "circle start")
+	assertPoint(t, circle.Segments[0].Center, drawing.Point{X: 30, Y: 30}, "circle center")
+	assertAlmost(t, circle.Segments[0].RadiusX, 10, "circle radius X")
+	assertAlmost(t, circle.Segments[0].RadiusY, 10, "circle radius Y")
+
+	ellipse := mustParseFixture(t, "04-ellipse.svg").Drawing.Strokes[0]
+	assertPoint(t, ellipse.Start, drawing.Point{X: 60, Y: 35}, "ellipse start")
+	assertPoint(t, ellipse.Segments[0].Center, drawing.Point{X: 40, Y: 35}, "ellipse center")
+	assertAlmost(t, ellipse.Segments[0].RadiusX, 20, "ellipse radius X")
+	assertAlmost(t, ellipse.Segments[0].RadiusY, 10, "ellipse radius Y")
+
+	polygon := mustParseFixture(t, "06-polygon.svg").Drawing.Strokes[0]
+	if !polygon.Closed {
+		t.Fatal("polygon is open, want closed")
+	}
+	assertSegment(t, polygon.Segments[1], drawing.SegmentLine, drawing.Point{X: 20, Y: 30}, drawing.Point{X: 30, Y: 20})
+}
+
+func TestParsePathCommands(t *testing.T) {
+	triangle := mustParseFixture(t, "07-triangle.svg").Drawing.Strokes[0]
+	if !triangle.Closed {
+		t.Fatal("triangle path is open, want closed")
+	}
+	assertPoint(t, triangle.Start, drawing.Point{X: 10, Y: 40}, "triangle start")
+	assertSegment(t, triangle.Segments[0], drawing.SegmentLine, drawing.Point{X: 10, Y: 40}, drawing.Point{X: 30, Y: 40})
+	assertSegment(t, triangle.Segments[1], drawing.SegmentLine, drawing.Point{X: 30, Y: 40}, drawing.Point{X: 20, Y: 20})
+
+	relative := mustParseFixture(t, "10-relative-path.svg").Drawing.Strokes[0]
+	if len(relative.Segments) != 4 {
+		t.Fatalf("relative segments = %d, want 4", len(relative.Segments))
+	}
+	assertSegment(t, relative.Segments[0], drawing.SegmentLine, drawing.Point{X: 10, Y: 20}, drawing.Point{X: 30, Y: 20})
+	assertSegment(t, relative.Segments[1], drawing.SegmentLine, drawing.Point{X: 30, Y: 20}, drawing.Point{X: 40, Y: 20})
+	assertSegment(t, relative.Segments[2], drawing.SegmentLine, drawing.Point{X: 40, Y: 20}, drawing.Point{X: 40, Y: 40})
+	assertSegment(t, relative.Segments[3], drawing.SegmentLine, drawing.Point{X: 40, Y: 40}, drawing.Point{X: 10, Y: 40})
+
+	multiple := mustParseFixture(t, "12-multiple-strokes.svg")
+	assertPoint(t, multiple.Drawing.Strokes[0].Start, drawing.Point{X: 10, Y: 10}, "first subpath start")
+	assertPoint(t, multiple.Drawing.Strokes[1].Start, drawing.Point{X: 50, Y: 20}, "second subpath start")
+}
+
+func TestParseCurveCommandsPreservesCurveSegments(t *testing.T) {
+	cubic := mustParseFixture(t, "08-cubic-bezier.svg").Drawing.Strokes[0]
+	if len(cubic.Segments) != 1 || cubic.Segments[0].Kind != drawing.SegmentCubic {
+		t.Fatalf("cubic segments = %+v, want one cubic segment", cubic.Segments)
+	}
+	assertPoint(t, cubic.Segments[0].Control1, drawing.Point{X: 20, Y: 20}, "cubic c1")
+	assertPoint(t, cubic.Segments[0].Control2, drawing.Point{X: 40, Y: 20}, "cubic c2")
+	assertPoint(t, cubic.Segments[0].End, drawing.Point{X: 50, Y: 50}, "cubic end")
+
+	quadratic := mustParseFixture(t, "09-quadratic-bezier.svg").Drawing.Strokes[0]
+	if len(quadratic.Segments) != 2 {
+		t.Fatalf("quadratic segments = %d, want 2", len(quadratic.Segments))
+	}
+	assertSegment(t, quadratic.Segments[0], drawing.SegmentQuadratic, drawing.Point{X: 10, Y: 50}, drawing.Point{X: 50, Y: 50})
+	assertPoint(t, quadratic.Segments[0].Control1, drawing.Point{X: 30, Y: 20}, "quadratic control")
+	assertSegment(t, quadratic.Segments[1], drawing.SegmentQuadratic, drawing.Point{X: 50, Y: 50}, drawing.Point{X: 90, Y: 50})
+	assertPoint(t, quadratic.Segments[1].Control1, drawing.Point{X: 70, Y: 80}, "smooth quadratic reflected control")
+}
+
+func TestParseDocumentMetadataAndTransformAttributes(t *testing.T) {
+	doc := mustParseFixture(t, "14-viewbox-scale.svg")
+	if doc.ViewBox == nil {
+		t.Fatal("ViewBox = nil, want parsed viewBox")
+	}
+	assertAlmost(t, doc.ViewBox.MinX, 0, "viewBox MinX")
+	assertAlmost(t, doc.ViewBox.MinY, 0, "viewBox MinY")
+	assertAlmost(t, doc.ViewBox.Width, 100, "viewBox Width")
+	assertAlmost(t, doc.ViewBox.Height, 50, "viewBox Height")
+	if doc.Width == nil || doc.Height == nil {
+		t.Fatal("width/height metadata missing")
+	}
+	assertAlmost(t, *doc.Width, 50, "width")
+	assertAlmost(t, *doc.Height, 25, "height")
+
+	transformed := mustParseFixture(t, "13-transforms.svg").Drawing.Strokes[0]
+	assertPoint(t, transformed.Transform.Apply(transformed.Start), drawing.Point{X: 10, Y: 20}, "transformed start")
+	assertPoint(t, transformed.Transform.Apply(transformed.Segments[0].End), drawing.Point{X: 20, Y: 20}, "transformed end")
+
+	nested := mustParseFixture(t, "15-nested-transforms.svg").Drawing.Strokes[0]
+	assertPoint(t, nested.Transform.Apply(nested.Start), drawing.Point{X: 20, Y: 20}, "nested transformed start")
+	assertPoint(t, nested.Transform.Apply(nested.Segments[0].End), drawing.Point{X: 40, Y: 20}, "nested transformed end")
 }
 
 func TestParseInvalidFixtureSuite(t *testing.T) {
@@ -215,7 +174,7 @@ func TestParseInvalidFixtureSuite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
-			_, err := ParseFile(fixturePath(tt.file), DefaultOptions())
+			_, err := ParseFile(fixturePath(tt.file))
 			if err == nil {
 				t.Fatal("ParseFile succeeded, want error")
 			}
@@ -238,7 +197,7 @@ func TestParseRejectsNarrowInlineParserErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse(strings.NewReader(tt.input), DefaultOptions())
+			_, err := Parse(strings.NewReader(tt.input))
 			if err == nil {
 				t.Fatal("Parse succeeded, want error")
 			}
@@ -249,100 +208,26 @@ func TestParseRejectsNarrowInlineParserErrors(t *testing.T) {
 	}
 }
 
-type fixtureCase struct {
-	file        string
-	strokes     int
-	closed      []bool
-	bounds      drawing.Bounds
-	starts      []drawing.Point
-	ends        []drawing.Point
-	exactPoints []int
-	minPoints   []int
-	flattened   bool
-}
-
-func assertFixture(t *testing.T, d drawing.Drawing, want fixtureCase) {
+func mustParseFixture(t *testing.T, file string) Document {
 	t.Helper()
-	if len(d.Strokes) != want.strokes {
-		t.Fatalf("strokes = %d, want %d", len(d.Strokes), want.strokes)
-	}
-	assertBounds(t, d.Bounds, want.bounds)
-	for i, stroke := range d.Strokes {
-		if stroke.Closed != want.closed[i] {
-			t.Fatalf("stroke %d closed = %v, want %v", i+1, stroke.Closed, want.closed[i])
-		}
-		assertPoint(t, stroke.Points[0], want.starts[i], "start")
-		assertPoint(t, stroke.Points[len(stroke.Points)-1], want.ends[i], "end")
-		if len(want.exactPoints) > i && want.exactPoints[i] > 0 && len(stroke.Points) != want.exactPoints[i] {
-			t.Fatalf("stroke %d point count = %d, want %d", i+1, len(stroke.Points), want.exactPoints[i])
-		}
-		if len(want.minPoints) > i && want.minPoints[i] > 0 && len(stroke.Points) < want.minPoints[i] {
-			t.Fatalf("stroke %d point count = %d, want at least %d", i+1, len(stroke.Points), want.minPoints[i])
-		}
-	}
-	if want.flattened && !hasFlattenedStroke(d) {
-		t.Fatal("fixture did not produce any flattened curve segments")
-	}
-}
-
-func assertGeneratedGCodePenSequencing(t *testing.T, d drawing.Drawing) {
-	t.Helper()
-	lines, err := drawing.GenerateGCode(d, drawing.DefaultOptions(0.5, 1.7))
+	doc, err := ParseFile(fixturePath(file))
 	if err != nil {
-		t.Fatalf("GenerateGCode: %v", err)
+		t.Fatalf("ParseFile: %v", err)
 	}
-
-	penDown := false
-	lowered := 0
-	rapidMoves := 0
-	for _, line := range lines {
-		command := line.Command
-		switch {
-		case strings.HasPrefix(command, "G1 Z1.700"):
-			if penDown {
-				t.Fatalf("lowered pen while already down: %q", command)
-			}
-			penDown = true
-			lowered++
-		case strings.HasPrefix(command, "G1 Z0.500"):
-			penDown = false
-		case strings.HasPrefix(command, "G0 "):
-			if penDown {
-				t.Fatalf("rapid move while pen is down: %q", command)
-			}
-			rapidMoves++
-		}
-	}
-	if penDown {
-		t.Fatal("generated G-code ended with pen down")
-	}
-	if lowered != len(d.Strokes) {
-		t.Fatalf("pen-down transitions = %d, want %d", lowered, len(d.Strokes))
-	}
-	if rapidMoves != len(d.Strokes)+1 {
-		t.Fatalf("rapid moves = %d, want one per stroke plus return to origin", rapidMoves)
-	}
+	return doc
 }
 
-func hasFlattenedStroke(d drawing.Drawing) bool {
-	for _, stroke := range d.Strokes {
-		if len(stroke.Points) > 3 {
-			return true
-		}
+func assertSegment(t *testing.T, got drawing.Segment, wantKind drawing.SegmentKind, wantStart, wantEnd drawing.Point) {
+	t.Helper()
+	if got.Kind != wantKind {
+		t.Fatalf("segment kind = %v, want %v", got.Kind, wantKind)
 	}
-	return false
+	assertPoint(t, got.Start, wantStart, "segment start")
+	assertPoint(t, got.End, wantEnd, "segment end")
 }
 
 func fixturePath(file string) string {
 	return filepath.Join("..", "..", "testdata", "svg", file)
-}
-
-func assertBounds(t *testing.T, got, want drawing.Bounds) {
-	t.Helper()
-	assertAlmost(t, got.MinX, want.MinX, "MinX")
-	assertAlmost(t, got.MinY, want.MinY, "MinY")
-	assertAlmost(t, got.MaxX, want.MaxX, "MaxX")
-	assertAlmost(t, got.MaxY, want.MaxY, "MaxY")
 }
 
 func assertPoint(t *testing.T, got, want drawing.Point, name string) {

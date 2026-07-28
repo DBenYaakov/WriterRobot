@@ -8,6 +8,7 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
+	"github.com/DBenYaakov/WriterRobot/internal/plot"
 )
 
 const defaultDrawFeed = 600
@@ -166,11 +167,15 @@ func generateStrokes(strokes []stroke, opts Options) ([]gcode.Line, error) {
 	if err != nil {
 		return nil, err
 	}
-	gcodeOpts := drawing.DefaultOptions(opts.PenUpZ, opts.PenDownZ)
-	gcodeOpts.PenRaiseFeed = opts.PenRaiseFeed
-	gcodeOpts.PenLowerFeed = opts.PenLowerFeed
-	gcodeOpts.DrawFeed = opts.DrawFeed
-	return drawing.GenerateGCode(d, gcodeOpts)
+	plotOpts := plot.DefaultOptions(opts.PenUpZ, opts.PenDownZ)
+	plotOpts.PenRaiseFeed = opts.PenRaiseFeed
+	plotOpts.PenLowerFeed = opts.PenLowerFeed
+	plotOpts.DrawFeed = opts.DrawFeed
+	ops, err := plot.Plan(d, plotOpts)
+	if err != nil {
+		return nil, err
+	}
+	return machine.ProgramFromPlan(ops)
 }
 
 func (opts Options) withDefaults() Options {

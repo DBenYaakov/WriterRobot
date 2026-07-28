@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"unicode"
 
-	"github.com/DBenYaakov/WriterRobot/internal/bezier"
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 )
 
@@ -16,7 +15,7 @@ type pathToken struct {
 	number  float64
 }
 
-func parsePath(data string, tolerance float64, transform matrix) ([]drawing.Stroke, error) {
+func parsePath(data string, transform drawing.Transform) ([]drawing.VectorStroke, error) {
 	tokens, err := tokenizePath(data)
 	if err != nil {
 		return nil, err
@@ -27,7 +26,6 @@ func parsePath(data string, tolerance float64, transform matrix) ([]drawing.Stro
 
 	parser := &pathParser{
 		tokens:    tokens,
-		tolerance: tolerance,
 		transform: transform,
 	}
 	return parser.parse()
@@ -36,23 +34,21 @@ func parsePath(data string, tolerance float64, transform matrix) ([]drawing.Stro
 type pathParser struct {
 	tokens    []pathToken
 	index     int
-	tolerance float64
-	transform matrix
+	transform drawing.Transform
 
 	current       drawing.Point
 	subpathStart  drawing.Point
-	currentStroke []drawing.Point
-	strokes       []drawing.Stroke
+	currentStroke *drawing.VectorStroke
+	strokes       []drawing.VectorStroke
 	hasCurrent    bool
 
-	lastCommand      byte
 	lastCubicControl drawing.Point
 	hasCubicControl  bool
 	lastQuadControl  drawing.Point
 	hasQuadControl   bool
 }
 
-func (p *pathParser) parse() ([]drawing.Stroke, error) {
+func (p *pathParser) parse() ([]drawing.VectorStroke, error) {
 	command := byte(0)
 	for p.index < len(p.tokens) {
 		if p.nextIsCommand() {
@@ -200,9 +196,6 @@ func (p *pathParser) runCommand(command byte) error {
 		if !p.hasCurrent {
 			return errors.New("Z command before current point")
 		}
-		if len(p.currentStroke) > 0 && !samePathPoint(p.current, p.subpathStart) {
-			p.currentStroke = append(p.currentStroke, p.subpathStart)
-		}
 		p.current = p.subpathStart
 		p.finishOpenStroke(true)
 	default:
@@ -215,7 +208,6 @@ func (p *pathParser) runCommand(command byte) error {
 	if upper != 'Q' && upper != 'T' {
 		p.hasQuadControl = false
 	}
-	p.lastCommand = command
 	return nil
 }
 
@@ -223,17 +215,21 @@ func (p *pathParser) moveTo(point drawing.Point) {
 	p.finishOpenStroke(false)
 	p.current = point
 	p.subpathStart = point
-	p.currentStroke = []drawing.Point{point}
+	p.currentStroke = &drawing.VectorStroke{Start: point, Transform: p.transform}
 	p.hasCurrent = true
 	p.hasCubicControl = false
 	p.hasQuadControl = false
 }
 
 func (p *pathParser) lineTo(point drawing.Point) {
-	if !p.hasCurrent {
+	if !p.hasCurrent || p.currentStroke == nil {
 		return
 	}
-	p.currentStroke = append(p.currentStroke, point)
+	p.currentStroke.Segments = append(p.currentStroke.Segments, drawing.Segment{
+		Kind:  drawing.SegmentLine,
+		Start: p.current,
+		End:   point,
+	})
 	p.current = point
 }
 
@@ -241,18 +237,16 @@ func (p *pathParser) cubicTo(c1, c2, end drawing.Point) error {
 	if !p.hasCurrent {
 		return errors.New("curve command before current point")
 	}
-	points, err := bezier.Flatten(bezier.Cubic{
-		P0: bezier.Point{X: p.current.X, Y: p.current.Y},
-		P1: bezier.Point{X: c1.X, Y: c1.Y},
-		P2: bezier.Point{X: c2.X, Y: c2.Y},
-		P3: bezier.Point{X: end.X, Y: end.Y},
-	}, p.tolerance)
-	if err != nil {
-		return fmt.Errorf("flatten cubic path segment: %w", err)
+	if p.currentStroke == nil {
+		return errors.New("curve command without active subpath")
 	}
-	for _, point := range points[1:] {
-		p.currentStroke = append(p.currentStroke, drawing.Point{X: point.X, Y: point.Y})
-	}
+	p.currentStroke.Segments = append(p.currentStroke.Segments, drawing.Segment{
+		Kind:     drawing.SegmentCubic,
+		Start:    p.current,
+		Control1: c1,
+		Control2: c2,
+		End:      end,
+	})
 	p.current = end
 	p.lastCubicControl = c2
 	p.hasCubicControl = true
@@ -261,17 +255,19 @@ func (p *pathParser) cubicTo(c1, c2, end drawing.Point) error {
 }
 
 func (p *pathParser) quadraticTo(control, end drawing.Point) error {
-	c1 := drawing.Point{
-		X: p.current.X + (2.0/3.0)*(control.X-p.current.X),
-		Y: p.current.Y + (2.0/3.0)*(control.Y-p.current.Y),
+	if !p.hasCurrent {
+		return errors.New("curve command before current point")
 	}
-	c2 := drawing.Point{
-		X: end.X + (2.0/3.0)*(control.X-end.X),
-		Y: end.Y + (2.0/3.0)*(control.Y-end.Y),
+	if p.currentStroke == nil {
+		return errors.New("curve command without active subpath")
 	}
-	if err := p.cubicTo(c1, c2, end); err != nil {
-		return err
-	}
+	p.currentStroke.Segments = append(p.currentStroke.Segments, drawing.Segment{
+		Kind:     drawing.SegmentQuadratic,
+		Start:    p.current,
+		Control1: control,
+		End:      end,
+	})
+	p.current = end
 	p.lastQuadControl = control
 	p.hasQuadControl = true
 	p.hasCubicControl = false
@@ -279,9 +275,10 @@ func (p *pathParser) quadraticTo(control, end drawing.Point) error {
 }
 
 func (p *pathParser) finishOpenStroke(closed bool) {
-	if len(p.currentStroke) >= 2 {
-		points := transformPoints(p.currentStroke, p.transform)
-		p.strokes = append(p.strokes, drawing.Stroke{Points: points, Closed: closed})
+	if p.currentStroke != nil && len(p.currentStroke.Segments) > 0 {
+		stroke := *p.currentStroke
+		stroke.Closed = closed
+		p.strokes = append(p.strokes, stroke)
 	}
 	p.currentStroke = nil
 }
@@ -427,8 +424,4 @@ func isPathCommand(b byte) bool {
 
 func reflectPoint(point, about drawing.Point) drawing.Point {
 	return drawing.Point{X: 2*about.X - point.X, Y: 2*about.Y - point.Y}
-}
-
-func samePathPoint(a, b drawing.Point) bool {
-	return math.Abs(a.X-b.X) < 0.0005 && math.Abs(a.Y-b.Y) < 0.0005
 }

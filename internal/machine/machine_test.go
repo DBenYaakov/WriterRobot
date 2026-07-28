@@ -5,6 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/DBenYaakov/WriterRobot/internal/drawing"
+	"github.com/DBenYaakov/WriterRobot/internal/gcode"
+	"github.com/DBenYaakov/WriterRobot/internal/plot"
 )
 
 func TestMoveZToEmitsAbsoluteZWithFeed(t *testing.T) {
@@ -166,6 +170,53 @@ func TestErrorsWrapPhysicalOperation(t *testing.T) {
 	}
 }
 
+func TestProgramFromPlanFormatsPlotOperations(t *testing.T) {
+	ops := []plot.Operation{
+		{Kind: plot.OperationPenUp, Z: 0.5, Feed: 300},
+		{Kind: plot.OperationRapidMove, Point: drawing.Point{X: 0, Y: 0}},
+		{Kind: plot.OperationPenDown, Z: 1.7, Feed: 200},
+		{Kind: plot.OperationDrawMove, Point: drawing.Point{X: 10, Y: 0}, Feed: 600},
+		{Kind: plot.OperationPenUp, Z: 0.5, Feed: 300},
+		{Kind: plot.OperationRapidMove, Point: drawing.Point{X: 20, Y: -5}},
+		{Kind: plot.OperationPenDown, Z: 1.7, Feed: 200},
+		{Kind: plot.OperationDrawMove, Point: drawing.Point{X: 30, Y: -5}, Feed: 600},
+		{Kind: plot.OperationPenUp, Z: 0.5, Feed: 300},
+		{Kind: plot.OperationRapidMove, Point: drawing.Point{}},
+		{Kind: plot.OperationPenUp, Z: 0.5, Feed: 300},
+	}
+
+	lines, err := ProgramFromPlan(ops)
+	if err != nil {
+		t.Fatalf("ProgramFromPlan: %v", err)
+	}
+
+	got := lineCommands(lines)
+	want := []string{
+		"G1 Z0.500 F300",
+		"G0 X0.000 Y0.000",
+		"G1 Z1.700 F200",
+		"G1 X10.000 Y0.000 F600",
+		"G1 Z0.500 F300",
+		"G0 X20.000 Y-5.000",
+		"G1 Z1.700 F200",
+		"G1 X30.000 Y-5.000 F600",
+		"G1 Z0.500 F300",
+		"G0 X0.000 Y0.000",
+		"G1 Z0.500 F300",
+	}
+	assertStrings(t, got, want)
+}
+
+func TestProgramFromPlanOmitsDrawFeedWhenPlannerLeavesItUnset(t *testing.T) {
+	lines, err := ProgramFromPlan([]plot.Operation{
+		{Kind: plot.OperationDrawMove, Point: drawing.Point{X: 1, Y: -2}},
+	})
+	if err != nil {
+		t.Fatalf("ProgramFromPlan: %v", err)
+	}
+	assertStrings(t, lineCommands(lines), []string{"G1 X1.000 Y-2.000"})
+}
+
 type recordingCommander struct {
 	commands []string
 	err      error
@@ -184,6 +235,26 @@ func assertCommands(t *testing.T, rec *recordingCommander, want ...string) {
 	for i := range want {
 		if rec.commands[i] != want[i] {
 			t.Fatalf("command %d = %q, want %q", i, rec.commands[i], want[i])
+		}
+	}
+}
+
+func lineCommands(lines []gcode.Line) []string {
+	commands := make([]string, 0, len(lines))
+	for _, line := range lines {
+		commands = append(commands, line.Command)
+	}
+	return commands
+}
+
+func assertStrings(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("strings = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("string %d = %q, want %q", i+1, got[i], want[i])
 		}
 	}
 }

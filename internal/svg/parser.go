@@ -1,4 +1,9 @@
-// Package svg imports a small, plotting-oriented subset of SVG.
+// Package svg imports a small, plotting-oriented subset of SVG into neutral
+// vector drawing geometry.
+//
+// The parser is limited to XML, supported SVG elements, path syntax, and SVG
+// document metadata. Coordinate normalization, viewBox scaling, curve
+// flattening, work-area fitting, and plot planning happen in later layers.
 package svg
 
 import (
@@ -14,72 +19,68 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 )
 
-// Anchor controls where transformed SVG geometry lands relative to the program
-// origin.
-type Anchor string
-
-const (
-	// AnchorTopLeft places the transformed SVG's top-left source corner at X0 Y0.
-	AnchorTopLeft Anchor = "top-left"
-	// AnchorCenter places the transformed SVG's center at X0 Y0.
-	AnchorCenter Anchor = "center"
-)
-
-// Options controls SVG import.
-type Options struct {
-	FlattenTolerance float64
-	FitWidth         float64
-	FitHeight        float64
-	Anchor           Anchor
+// Document is parsed SVG vector geometry plus source-viewport metadata.
+type Document struct {
+	Drawing drawing.VectorDrawing
+	ViewBox *ViewBox
+	Width   *float64
+	Height  *float64
 }
 
-// DefaultOptions returns conservative SVG import defaults.
-func DefaultOptions() Options {
-	return Options{FlattenTolerance: 0.10, Anchor: AnchorTopLeft}
+// ViewBox is the parsed SVG viewBox rectangle.
+type ViewBox struct {
+	MinX   float64
+	MinY   float64
+	Width  float64
+	Height float64
 }
 
 // ParseFile loads and parses an SVG file.
-func ParseFile(path string, opts Options) (drawing.Drawing, error) {
+func ParseFile(path string) (Document, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return drawing.Drawing{}, fmt.Errorf("open SVG: %w", err)
+		return Document{}, fmt.Errorf("open SVG: %w", err)
 	}
 	defer file.Close()
-	return Parse(file, opts)
+	return Parse(file)
 }
 
-// Parse parses SVG geometry into WriterRobot program coordinates.
-func Parse(r io.Reader, opts Options) (drawing.Drawing, error) {
-	opts = opts.withDefaults()
-	if err := validateOptions(opts); err != nil {
-		return drawing.Drawing{}, err
-	}
-
+// Parse parses supported SVG geometry into source-coordinate vector strokes.
+func Parse(r io.Reader) (Document, error) {
 	root, err := decode(r)
 	if err != nil {
-		return drawing.Drawing{}, err
+		return Document{}, err
 	}
 	if root.name != "svg" {
-		return drawing.Drawing{}, fmt.Errorf("root element is <%s>, want <svg>", root.name)
+		return Document{}, fmt.Errorf("root element is <%s>, want <svg>", root.name)
 	}
 
-	importer := &importer{tolerance: opts.FlattenTolerance}
-	if err := importer.process(root, identityMatrix()); err != nil {
-		return drawing.Drawing{}, err
+	viewBox, err := parseViewBox(root.attrs["viewBox"])
+	if err != nil {
+		return Document{}, err
+	}
+	width, err := optionalRootLength(root, "width")
+	if err != nil {
+		return Document{}, err
+	}
+	height, err := optionalRootLength(root, "height")
+	if err != nil {
+		return Document{}, err
+	}
+
+	importer := &importer{}
+	if err := importer.process(root, drawing.IdentityTransform()); err != nil {
+		return Document{}, err
 	}
 	if len(importer.strokes) == 0 {
-		return drawing.Drawing{}, errors.New("SVG contains no supported drawable geometry")
+		return Document{}, errors.New("SVG contains no supported drawable geometry")
 	}
-
-	source, err := root.sourceBounds(importer.strokes)
-	if err != nil {
-		return drawing.Drawing{}, err
-	}
-	scale, err := root.scaleFor(source, opts)
-	if err != nil {
-		return drawing.Drawing{}, err
-	}
-	return transformToProgram(importer.strokes, source, scale, opts.Anchor)
+	return Document{
+		Drawing: drawing.VectorDrawing{Strokes: importer.strokes},
+		ViewBox: viewBox,
+		Width:   width,
+		Height:  height,
+	}, nil
 }
 
 type element struct {
@@ -89,8 +90,7 @@ type element struct {
 }
 
 type importer struct {
-	tolerance float64
-	strokes   []drawing.Stroke
+	strokes []drawing.VectorStroke
 }
 
 func decode(r io.Reader) (element, error) {
@@ -139,7 +139,7 @@ func readElement(decoder *xml.Decoder, start xml.StartElement) (element, error) 
 	}
 }
 
-func (i *importer) process(elem element, parent matrix) error {
+func (i *importer) process(elem element, parent drawing.Transform) error {
 	if ignoredElement(elem.name) {
 		return nil
 	}
@@ -150,7 +150,7 @@ func (i *importer) process(elem element, parent matrix) error {
 	if err != nil {
 		return fmt.Errorf("<%s> transform: %w", elem.name, err)
 	}
-	transform := multiply(parent, local)
+	transform := parent.Then(local)
 
 	switch elem.name {
 	case "svg", "g":
@@ -160,7 +160,7 @@ func (i *importer) process(elem element, parent matrix) error {
 			}
 		}
 	case "path":
-		strokes, err := parsePath(elem.attrs["d"], i.tolerance, transform)
+		strokes, err := parsePath(elem.attrs["d"], transform)
 		if err != nil {
 			return fmt.Errorf("<path>: %w", err)
 		}
@@ -190,13 +190,13 @@ func (i *importer) process(elem element, parent matrix) error {
 		}
 		i.strokes = append(i.strokes, stroke)
 	case "circle":
-		stroke, err := parseCircle(elem, i.tolerance, transform)
+		stroke, err := parseCircle(elem, transform)
 		if err != nil {
 			return err
 		}
 		i.strokes = append(i.strokes, stroke)
 	case "ellipse":
-		stroke, err := parseEllipse(elem, i.tolerance, transform)
+		stroke, err := parseEllipse(elem, transform)
 		if err != nil {
 			return err
 		}
@@ -207,70 +207,67 @@ func (i *importer) process(elem element, parent matrix) error {
 	return nil
 }
 
-func parseLine(elem element, transform matrix) (drawing.Stroke, error) {
+func parseLine(elem element, transform drawing.Transform) (drawing.VectorStroke, error) {
 	x1, err := requiredLength(elem, "x1")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	y1, err := requiredLength(elem, "y1")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	x2, err := requiredLength(elem, "x2")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	y2, err := requiredLength(elem, "y2")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
-	return drawing.Stroke{Points: []drawing.Point{
-		transform.apply(drawing.Point{X: x1, Y: y1}),
-		transform.apply(drawing.Point{X: x2, Y: y2}),
-	}}, nil
+	return strokeFromPoints([]drawing.Point{{X: x1, Y: y1}, {X: x2, Y: y2}}, false, transform), nil
 }
 
-func parsePolyline(elem element, closed bool, transform matrix) (drawing.Stroke, error) {
-	points, err := parsePoints(elem.attrs["points"], transform)
+func parsePolyline(elem element, closed bool, transform drawing.Transform) (drawing.VectorStroke, error) {
+	points, err := parsePoints(elem.attrs["points"])
 	if err != nil {
-		return drawing.Stroke{}, fmt.Errorf("<%s>: %w", elem.name, err)
+		return drawing.VectorStroke{}, fmt.Errorf("<%s>: %w", elem.name, err)
 	}
 	if len(points) < 2 {
-		return drawing.Stroke{}, fmt.Errorf("<%s> contains fewer than two points", elem.name)
+		return drawing.VectorStroke{}, fmt.Errorf("<%s> contains fewer than two points", elem.name)
 	}
-	return drawing.Stroke{Points: points, Closed: closed}, nil
+	return strokeFromPoints(points, closed, transform), nil
 }
 
-func parseRect(elem element, transform matrix) (drawing.Stroke, error) {
+func parseRect(elem element, transform drawing.Transform) (drawing.VectorStroke, error) {
 	rx, err := optionalLengthAttr(elem, "rx")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	ry, err := optionalLengthAttr(elem, "ry")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	if rx > 0 || ry > 0 {
-		return drawing.Stroke{}, errors.New("<rect> with rounded corners is not supported")
+		return drawing.VectorStroke{}, errors.New("<rect> with rounded corners is not supported")
 	}
 	x, err := optionalLengthAttr(elem, "x")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	y, err := optionalLengthAttr(elem, "y")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	width, err := requiredLength(elem, "width")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	height, err := requiredLength(elem, "height")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	if width <= 0 || height <= 0 {
-		return drawing.Stroke{}, errors.New("<rect> width and height must be greater than zero")
+		return drawing.VectorStroke{}, errors.New("<rect> width and height must be greater than zero")
 	}
 	points := []drawing.Point{
 		{X: x, Y: y},
@@ -278,91 +275,86 @@ func parseRect(elem element, transform matrix) (drawing.Stroke, error) {
 		{X: x + width, Y: y + height},
 		{X: x, Y: y + height},
 	}
-	return drawing.Stroke{Points: transformPoints(points, transform), Closed: true}, nil
+	return strokeFromPoints(points, true, transform), nil
 }
 
-func parseCircle(elem element, tolerance float64, transform matrix) (drawing.Stroke, error) {
+func parseCircle(elem element, transform drawing.Transform) (drawing.VectorStroke, error) {
 	cx, err := optionalLengthAttr(elem, "cx")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	cy, err := optionalLengthAttr(elem, "cy")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	r, err := requiredLength(elem, "r")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	if r <= 0 {
-		return drawing.Stroke{}, errors.New("<circle> radius must be greater than zero")
+		return drawing.VectorStroke{}, errors.New("<circle> radius must be greater than zero")
 	}
-	return ellipseStroke(cx, cy, r, r, tolerance, transform), nil
+	return ellipseStroke(cx, cy, r, r, transform), nil
 }
 
-func parseEllipse(elem element, tolerance float64, transform matrix) (drawing.Stroke, error) {
+func parseEllipse(elem element, transform drawing.Transform) (drawing.VectorStroke, error) {
 	cx, err := optionalLengthAttr(elem, "cx")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	cy, err := optionalLengthAttr(elem, "cy")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	rx, err := requiredLength(elem, "rx")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	ry, err := requiredLength(elem, "ry")
 	if err != nil {
-		return drawing.Stroke{}, err
+		return drawing.VectorStroke{}, err
 	}
 	if rx <= 0 || ry <= 0 {
-		return drawing.Stroke{}, errors.New("<ellipse> radii must be greater than zero")
+		return drawing.VectorStroke{}, errors.New("<ellipse> radii must be greater than zero")
 	}
-	return ellipseStroke(cx, cy, rx, ry, tolerance, transform), nil
+	return ellipseStroke(cx, cy, rx, ry, transform), nil
 }
 
-func ellipseStroke(cx, cy, rx, ry, tolerance float64, transform matrix) drawing.Stroke {
-	segments := segmentsForRadius(math.Max(rx, ry), tolerance)
-	points := make([]drawing.Point, 0, segments)
-	for i := 0; i < segments; i++ {
-		angle := 2 * math.Pi * float64(i) / float64(segments)
-		points = append(points, transform.apply(drawing.Point{
-			X: cx + rx*math.Cos(angle),
-			Y: cy + ry*math.Sin(angle),
-		}))
+func ellipseStroke(cx, cy, rx, ry float64, transform drawing.Transform) drawing.VectorStroke {
+	start := drawing.Point{X: cx + rx, Y: cy}
+	return drawing.VectorStroke{
+		Start: start,
+		Segments: []drawing.Segment{{
+			Kind:    drawing.SegmentEllipse,
+			Start:   start,
+			End:     start,
+			Center:  drawing.Point{X: cx, Y: cy},
+			RadiusX: rx,
+			RadiusY: ry,
+		}},
+		Closed:    true,
+		Transform: transform,
 	}
-	return drawing.Stroke{Points: points, Closed: true}
 }
 
-func segmentsForRadius(radius, tolerance float64) int {
-	if tolerance <= 0 || tolerance >= radius {
-		return 24
+func strokeFromPoints(points []drawing.Point, closed bool, transform drawing.Transform) drawing.VectorStroke {
+	segments := make([]drawing.Segment, 0, len(points)-1)
+	for i := 1; i < len(points); i++ {
+		segments = append(segments, drawing.Segment{
+			Kind:  drawing.SegmentLine,
+			Start: points[i-1],
+			End:   points[i],
+		})
 	}
-	angle := 2 * math.Acos(1-tolerance/radius)
-	if angle <= 0 || math.IsNaN(angle) || math.IsInf(angle, 0) {
-		return 24
+	return drawing.VectorStroke{
+		Start:     points[0],
+		Segments:  segments,
+		Closed:    closed,
+		Transform: transform,
 	}
-	segments := int(math.Ceil(2 * math.Pi / angle))
-	if segments < 24 {
-		return 24
-	}
-	if segments > 720 {
-		return 720
-	}
-	return segments
 }
 
-func transformPoints(points []drawing.Point, transform matrix) []drawing.Point {
-	result := make([]drawing.Point, 0, len(points))
-	for _, point := range points {
-		result = append(result, transform.apply(point))
-	}
-	return result
-}
-
-func parsePoints(value string, transform matrix) ([]drawing.Point, error) {
+func parsePoints(value string) ([]drawing.Point, error) {
 	numbers, err := parseNumberList(value)
 	if err != nil {
 		return nil, err
@@ -372,98 +364,37 @@ func parsePoints(value string, transform matrix) ([]drawing.Point, error) {
 	}
 	points := make([]drawing.Point, 0, len(numbers)/2)
 	for i := 0; i < len(numbers); i += 2 {
-		points = append(points, transform.apply(drawing.Point{X: numbers[i], Y: numbers[i+1]}))
+		points = append(points, drawing.Point{X: numbers[i], Y: numbers[i+1]})
 	}
 	return points, nil
 }
 
-func (elem element) sourceBounds(strokes []drawing.Stroke) (sourceRect, error) {
-	if viewBox, ok, err := parseViewBox(elem.attrs["viewBox"]); err != nil {
-		return sourceRect{}, err
-	} else if ok {
-		return viewBox, nil
-	}
-	d, err := drawing.New(strokes)
-	if err != nil {
-		return sourceRect{}, err
-	}
-	return sourceRect{MinX: d.Bounds.MinX, MinY: d.Bounds.MinY, Width: d.Bounds.Width(), Height: d.Bounds.Height()}, nil
-}
-
-func (elem element) scaleFor(source sourceRect, opts Options) (float64, error) {
-	if source.Width <= 0 || source.Height <= 0 {
-		return 0, errors.New("SVG source bounds must have non-zero width and height")
-	}
-
-	scale := 1.0
-	width, hasWidth, err := optionalLength(elem.attrs["width"])
-	if err != nil {
-		return 0, fmt.Errorf("<svg> width: %w", err)
-	}
-	height, hasHeight, err := optionalLength(elem.attrs["height"])
-	if err != nil {
-		return 0, fmt.Errorf("<svg> height: %w", err)
-	}
-	if hasWidth && hasHeight {
-		scale = math.Min(width/source.Width, height/source.Height)
-	}
-	if opts.FitWidth > 0 && opts.FitHeight > 0 {
-		scale = math.Min(opts.FitWidth/source.Width, opts.FitHeight/source.Height)
-	} else if opts.FitWidth > 0 {
-		scale = opts.FitWidth / source.Width
-	} else if opts.FitHeight > 0 {
-		scale = opts.FitHeight / source.Height
-	}
-	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
-		return 0, errors.New("SVG scale must be finite and greater than zero")
-	}
-	return scale, nil
-}
-
-func transformToProgram(strokes []drawing.Stroke, source sourceRect, scale float64, anchor Anchor) (drawing.Drawing, error) {
-	offsetX := 0.0
-	offsetY := 0.0
-	if anchor == AnchorCenter {
-		offsetX = -source.Width * scale / 2
-		offsetY = source.Height * scale / 2
-	}
-
-	transformed := make([]drawing.Stroke, 0, len(strokes))
-	for _, stroke := range strokes {
-		points := make([]drawing.Point, 0, len(stroke.Points))
-		for _, point := range stroke.Points {
-			points = append(points, drawing.Point{
-				X: offsetX + (point.X-source.MinX)*scale,
-				Y: offsetY - (point.Y-source.MinY)*scale,
-			})
-		}
-		transformed = append(transformed, drawing.Stroke{Points: points, Closed: stroke.Closed})
-	}
-	return drawing.New(transformed)
-}
-
-type sourceRect struct {
-	MinX   float64
-	MinY   float64
-	Width  float64
-	Height float64
-}
-
-func parseViewBox(value string) (sourceRect, bool, error) {
+func parseViewBox(value string) (*ViewBox, error) {
 	if strings.TrimSpace(value) == "" {
-		return sourceRect{}, false, nil
+		return nil, nil
 	}
 	numbers, err := parseNumberList(value)
 	if err != nil {
-		return sourceRect{}, false, fmt.Errorf("parse viewBox: %w", err)
+		return nil, fmt.Errorf("parse viewBox: %w", err)
 	}
 	if len(numbers) != 4 {
-		return sourceRect{}, false, errors.New("viewBox must contain four numbers")
+		return nil, errors.New("viewBox must contain four numbers")
 	}
 	if numbers[2] <= 0 || numbers[3] <= 0 {
-		return sourceRect{}, false, errors.New("viewBox width and height must be greater than zero")
+		return nil, errors.New("viewBox width and height must be greater than zero")
 	}
-	return sourceRect{MinX: numbers[0], MinY: numbers[1], Width: numbers[2], Height: numbers[3]}, true, nil
+	return &ViewBox{MinX: numbers[0], MinY: numbers[1], Width: numbers[2], Height: numbers[3]}, nil
+}
+
+func optionalRootLength(elem element, name string) (*float64, error) {
+	parsed, ok, err := optionalLength(elem.attrs[name])
+	if err != nil {
+		return nil, fmt.Errorf("<svg> %s: %w", name, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	return &parsed, nil
 }
 
 func requiredLength(elem element, name string) (float64, error) {
@@ -548,29 +479,4 @@ func rejectUnsafeAttributes(elem element) error {
 		}
 	}
 	return nil
-}
-
-func (opts Options) withDefaults() Options {
-	if opts.FlattenTolerance == 0 {
-		opts.FlattenTolerance = DefaultOptions().FlattenTolerance
-	}
-	if opts.Anchor == "" {
-		opts.Anchor = AnchorTopLeft
-	}
-	return opts
-}
-
-func validateOptions(opts Options) error {
-	if opts.FlattenTolerance <= 0 || math.IsNaN(opts.FlattenTolerance) || math.IsInf(opts.FlattenTolerance, 0) {
-		return errors.New("SVG flattening tolerance must be finite and greater than zero")
-	}
-	if opts.FitWidth < 0 || opts.FitHeight < 0 {
-		return errors.New("SVG fit dimensions must not be negative")
-	}
-	switch opts.Anchor {
-	case AnchorTopLeft, AnchorCenter:
-		return nil
-	default:
-		return fmt.Errorf("unsupported SVG anchor %q", opts.Anchor)
-	}
 }
