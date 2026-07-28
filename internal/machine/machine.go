@@ -46,6 +46,46 @@ func (m *Machine) SetUnitsMillimeters(ctx context.Context) error {
 	return nil
 }
 
+// SetAbsolutePositioning sets GRBL's distance mode to absolute positioning.
+func (m *Machine) SetAbsolutePositioning(ctx context.Context) error {
+	if err := m.commander.Command(ctx, "G90"); err != nil {
+		return fmt.Errorf("set absolute positioning: %w", err)
+	}
+	return nil
+}
+
+// SelectXYPlane selects the XY plane for motion commands.
+func (m *Machine) SelectXYPlane(ctx context.Context) error {
+	if err := m.commander.Command(ctx, "G17"); err != nil {
+		return fmt.Errorf("select XY plane: %w", err)
+	}
+	return nil
+}
+
+// SetFeedRateUnitsPerMinute sets GRBL's feed rate mode to units per minute.
+func (m *Machine) SetFeedRateUnitsPerMinute(ctx context.Context) error {
+	if err := m.commander.Command(ctx, "G94"); err != nil {
+		return fmt.Errorf("set feed rate mode to units per minute: %w", err)
+	}
+	return nil
+}
+
+// SelectDefaultWorkCoordinateSystem selects GRBL's default G54 coordinate system.
+func (m *Machine) SelectDefaultWorkCoordinateSystem(ctx context.Context) error {
+	if err := m.commander.Command(ctx, "G54"); err != nil {
+		return fmt.Errorf("select G54 work coordinate system: %w", err)
+	}
+	return nil
+}
+
+// ClearProgramOffset clears any active G92 program offset.
+func (m *Machine) ClearProgramOffset(ctx context.Context) error {
+	if err := m.commander.Command(ctx, "G92.1"); err != nil {
+		return fmt.Errorf("clear G92 program offset: %w", err)
+	}
+	return nil
+}
+
 // MoveZTo moves to an absolute Z position at the given feed rate.
 func (m *Machine) MoveZTo(ctx context.Context, z, feed float64) error {
 	command := fmt.Sprintf("G1 Z%.3f F%s", z, formatFeed(feed))

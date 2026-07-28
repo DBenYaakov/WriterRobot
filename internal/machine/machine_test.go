@@ -63,6 +63,38 @@ func TestSetProgramXYOriginEmitsG92(t *testing.T) {
 	assertCommands(t, rec, "G92 X0 Y0")
 }
 
+func TestModalAndOffsetCommands(t *testing.T) {
+	rec := &recordingCommander{}
+	robot := New(rec)
+
+	if err := robot.SetUnitsMillimeters(context.Background()); err != nil {
+		t.Fatalf("SetUnitsMillimeters: %v", err)
+	}
+	if err := robot.SetAbsolutePositioning(context.Background()); err != nil {
+		t.Fatalf("SetAbsolutePositioning: %v", err)
+	}
+	if err := robot.SelectXYPlane(context.Background()); err != nil {
+		t.Fatalf("SelectXYPlane: %v", err)
+	}
+	if err := robot.SetFeedRateUnitsPerMinute(context.Background()); err != nil {
+		t.Fatalf("SetFeedRateUnitsPerMinute: %v", err)
+	}
+	if err := robot.SelectDefaultWorkCoordinateSystem(context.Background()); err != nil {
+		t.Fatalf("SelectDefaultWorkCoordinateSystem: %v", err)
+	}
+	if err := robot.ClearProgramOffset(context.Background()); err != nil {
+		t.Fatalf("ClearProgramOffset: %v", err)
+	}
+	assertCommands(t, rec,
+		"G21",
+		"G90",
+		"G17",
+		"G94",
+		"G54",
+		"G92.1",
+	)
+}
+
 func TestPenRaiseUsesConfiguredPenUp(t *testing.T) {
 	rec := &recordingCommander{}
 	pen := NewPen(New(rec), 0.5, 1.7)

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DBenYaakov/WriterRobot/internal/console"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 )
 
@@ -33,6 +34,7 @@ type Options struct {
 	StartupDwell   time.Duration
 	Verbose        bool
 	Log            io.Writer
+	Logger         console.Logger
 }
 
 type receivedLine struct {
@@ -75,6 +77,9 @@ func New(port io.ReadWriteCloser, opts Options) *Sender {
 	}
 	if opts.Log == nil {
 		opts.Log = io.Discard
+	}
+	if opts.Logger == nil {
+		opts.Logger = console.New(opts.Log)
 	}
 	s := &Sender{
 		port:     port,
@@ -180,9 +185,7 @@ func (s *Sender) Command(ctx context.Context, command string) error {
 
 // FeedHold sends GRBL's real-time feed-hold command.
 func (s *Sender) FeedHold() error {
-	if s.opts.Verbose {
-		fmt.Fprintln(s.opts.Log, "-> <feed hold>")
-	}
+	s.logTransmitted("<feed hold>")
 	if err := s.writeBytes([]byte{feedHold}); err != nil {
 		return fmt.Errorf("feed hold: %w", err)
 	}
@@ -229,9 +232,7 @@ func (s *Sender) reset(ctx context.Context) error {
 	s.setDesynced(true)
 	s.drainPending()
 
-	if s.opts.Verbose {
-		fmt.Fprintln(s.opts.Log, "-> <soft reset>")
-	}
+	s.logTransmitted("<soft reset>")
 	if err := s.writeBytes([]byte{softReset}); err != nil {
 		return fmt.Errorf("soft reset: %w", err)
 	}
@@ -272,9 +273,7 @@ func (s *Sender) sendCommand(ctx context.Context, command string) error {
 	}
 	defer release()
 
-	if s.opts.Verbose {
-		fmt.Fprintf(s.opts.Log, "-> %s\n", command)
-	}
+	s.logTransmitted(command)
 	if err := s.writeString(command + "\n"); err != nil {
 		return fmt.Errorf("write command: %w", err)
 	}
@@ -478,7 +477,13 @@ func (s *Sender) drainPending() {
 
 func (s *Sender) logReceived(line string) {
 	if s.opts.Verbose {
-		fmt.Fprintf(s.opts.Log, "<- %s\n", line)
+		s.opts.Logger.Rx(line)
+	}
+}
+
+func (s *Sender) logTransmitted(line string) {
+	if s.opts.Verbose {
+		s.opts.Logger.Tx(line)
 	}
 }
 

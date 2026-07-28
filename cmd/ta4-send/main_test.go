@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -9,8 +10,10 @@ import (
 	"time"
 
 	"github.com/DBenYaakov/WriterRobot/internal/config"
+	"github.com/DBenYaakov/WriterRobot/internal/console"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
+	"github.com/DBenYaakov/WriterRobot/internal/session"
 )
 
 func TestReadKey(t *testing.T) {
@@ -68,7 +71,7 @@ func TestInterruptDuringStreamingRunsRecovery(t *testing.T) {
 		}
 	})
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -113,10 +116,10 @@ func TestCalibrationCancellationWhilePenDownRaisesPen(t *testing.T) {
 		}
 	})
 	sender := testSender(port)
-	robot, pen, recovery := testMachine(sender)
+	robot, drawingSession, pen, recovery := testMachine(sender)
 	cfg := config.Config{PenUp: 0.5, PenDown: 1.7, StartX: 10, StartY: -20}
 
-	err := calibrateStartPositionFrom(context.Background(), sender, robot, pen, &cfg, 1, recovery, strings.NewReader("d\x03"))
+	err := calibrateStartPositionFrom(context.Background(), sender, drawingSession, robot, pen, &cfg, 1, recovery, strings.NewReader("d\x03"), testLogger())
 	if err != context.Canceled {
 		t.Fatalf("calibrateStartPositionFrom error = %v, want context.Canceled", err)
 	}
@@ -131,10 +134,10 @@ func TestCalibrationCancellationWhilePenDownRaisesPen(t *testing.T) {
 func TestCalibrationStartPositionCanFinishWithoutDiagnostics(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	robot, pen, recovery := testMachine(sender)
+	robot, drawingSession, pen, recovery := testMachine(sender)
 	cfg := config.Config{PenUp: 0.5, PenDown: 1.7, StartX: 10, StartY: -20}
 
-	err := calibrateStartPositionFrom(context.Background(), sender, robot, pen, &cfg, 1, recovery, strings.NewReader("\r\r"))
+	err := calibrateStartPositionFrom(context.Background(), sender, drawingSession, robot, pen, &cfg, 1, recovery, strings.NewReader("\r\r"), testLogger())
 	if err != nil {
 		t.Fatalf("calibrateStartPositionFrom: %v", err)
 	}
@@ -147,18 +150,36 @@ func TestCalibrationStartPositionCanFinishWithoutDiagnostics(t *testing.T) {
 	if !port.sawCommand("G92 X0 Y0") {
 		t.Fatal("program origin command was not written")
 	}
+	if got := port.countCommand("G92.1"); got != 2 {
+		t.Fatalf("program offset clear count = %d, want 2", got)
+	}
 	if port.sawCommand("G1 X60.000 Y0.000 F600") {
 		t.Fatal("diagnostic pattern was drawn without selecting one")
+	}
+}
+
+func TestCalibrationDiagnosticsCancellationClearsSession(t *testing.T) {
+	port := newOKScriptedPort()
+	sender := testSender(port)
+	robot, drawingSession, pen, recovery := testMachine(sender)
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7, StartX: 10, StartY: -20}
+
+	err := calibrateStartPositionFrom(context.Background(), sender, drawingSession, robot, pen, &cfg, 1, recovery, strings.NewReader("\r\x03"), testLogger())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("calibrateStartPositionFrom error = %v, want context.Canceled", err)
+	}
+	if got := port.countCommand("G92.1"); got != 2 {
+		t.Fatalf("program offset clear count = %d, want 2", got)
 	}
 }
 
 func TestCalibrationDiagnosticsDrawSelectedPattern(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	robot, pen, recovery := testMachine(sender)
+	robot, drawingSession, pen, recovery := testMachine(sender)
 	cfg := config.Config{PenUp: 0.5, PenDown: 1.7, StartX: 10, StartY: -20}
 
-	err := calibrateStartPositionFrom(context.Background(), sender, robot, pen, &cfg, 1, recovery, strings.NewReader("\rx\r"))
+	err := calibrateStartPositionFrom(context.Background(), sender, drawingSession, robot, pen, &cfg, 1, recovery, strings.NewReader("\rx\r"), testLogger())
 	if err != nil {
 		t.Fatalf("calibrateStartPositionFrom: %v", err)
 	}
@@ -179,18 +200,16 @@ func TestCalibrationDiagnosticsDrawSelectedPattern(t *testing.T) {
 	}
 }
 
-func TestPaperOriginCommandsRemainMachineMoveThenG92(t *testing.T) {
+func TestPaperOriginSessionCommandsRemainOrdered(t *testing.T) {
 	rec := &commandRecorder{}
 	robot := machine.New(rec)
+	drawingSession := session.New(robot)
 	cfg := config.Config{StartX: 10.125, StartY: -20.5}
 
-	if err := robot.MoveMachineXYTo(context.Background(), cfg.StartX, cfg.StartY); err != nil {
-		t.Fatalf("MoveMachineXYTo: %v", err)
+	if err := drawingSession.Begin(context.Background(), cfg.StartX, cfg.StartY); err != nil {
+		t.Fatalf("Begin: %v", err)
 	}
-	if err := robot.SetProgramXYOrigin(context.Background()); err != nil {
-		t.Fatalf("SetProgramXYOrigin: %v", err)
-	}
-	want := []string{"G53 G0 X10.125 Y-20.500", "G92 X0 Y0"}
+	want := []string{"G21", "G90", "G17", "G94", "G54", "G92.1", "G53 G0 X10.125 Y-20.500", "G92 X0 Y0"}
 	if strings.Join(rec.commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("commands = %v, want %v", rec.commands, want)
 	}
@@ -199,7 +218,7 @@ func TestPaperOriginCommandsRemainMachineMoveThenG92(t *testing.T) {
 func TestPenUpCleanupSuccess(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	report := recovery.penUpOnly()
 	if !report.penUpAttempted {
@@ -213,6 +232,12 @@ func TestPenUpCleanupSuccess(t *testing.T) {
 	}
 	if !port.sawCommand("G21") {
 		t.Fatal("millimeter units command was not written")
+	}
+	if !port.sawCommand("G90") {
+		t.Fatal("absolute positioning command was not written")
+	}
+	if !port.sawCommand("G92.1") {
+		t.Fatal("program offset clear command was not written")
 	}
 	if !port.sawCommand("G1 Z0.500 F300") {
 		t.Fatal("pen-up command was not written")
@@ -232,7 +257,7 @@ func TestPenUpCleanupFailure(t *testing.T) {
 		}
 	})
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	report := recovery.penUpOnly()
 	if !report.penUpAttempted {
@@ -246,7 +271,7 @@ func TestPenUpCleanupFailure(t *testing.T) {
 func TestFeedHoldTransmission(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	report := recovery.interrupt()
 	if !report.feedHoldSent || report.feedHoldErr != nil {
@@ -260,7 +285,7 @@ func TestFeedHoldTransmission(t *testing.T) {
 func TestCleanupOnlyOnce(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	recovery.penUpOnly()
 	recovery.penUpOnly()
@@ -273,7 +298,7 @@ func TestCleanupOnlyOnce(t *testing.T) {
 func TestConcurrentMachineRecoveryCallersReceiveCompletedReport(t *testing.T) {
 	port := newOKScriptedPort()
 	sender := testSender(port)
-	_, _, recovery := testMachine(sender)
+	_, _, _, recovery := testMachine(sender)
 
 	const callers = 8
 	var wg sync.WaitGroup
@@ -307,16 +332,21 @@ func testSender(port *scriptedPort) *grbl.Sender {
 	})
 }
 
-func testMachine(sender *grbl.Sender) (*machine.Machine, *machine.Pen, *machineRecovery) {
+func testMachine(sender *grbl.Sender) (*machine.Machine, *session.Session, *machine.Pen, *machineRecovery) {
 	robot := machine.New(sender)
+	drawingSession := session.New(robot)
 	pen := machine.NewPen(robot, 0.5, 1.7)
-	recovery := newMachineRecovery(sender, robot, pen, io.Discard, recoveryTimings{
+	recovery := newMachineRecovery(sender, drawingSession, pen, testLogger(), recoveryTimings{
 		holdWait:       100 * time.Millisecond,
 		resetWait:      100 * time.Millisecond,
 		commandWait:    100 * time.Millisecond,
 		finalStateWait: 100 * time.Millisecond,
 	})
-	return robot, pen, recovery
+	return robot, drawingSession, pen, recovery
+}
+
+func testLogger() console.Logger {
+	return console.New(io.Discard)
 }
 
 type commandRecorder struct {

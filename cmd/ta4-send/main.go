@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/DBenYaakov/WriterRobot/internal/config"
+	"github.com/DBenYaakov/WriterRobot/internal/console"
 	"github.com/DBenYaakov/WriterRobot/internal/diagnostics"
 	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
+	"github.com/DBenYaakov/WriterRobot/internal/session"
 	"go.bug.st/serial"
 	"golang.org/x/term"
 )
@@ -45,6 +47,8 @@ func run() int {
 	}
 	flag.Parse()
 
+	log := console.New(os.Stdout)
+
 	if *calibrateMode {
 		if flag.NArg() != 0 {
 			flag.Usage()
@@ -57,56 +61,57 @@ func run() int {
 
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
-		return fail("load configuration", err)
+		return fail(log, "load configuration", err)
 	}
 
 	mode := &serial.Mode{BaudRate: *baud}
 	port, err := serial.Open(*portName, mode)
 	if err != nil {
-		return fail("open serial port", err)
+		return fail(log, "open serial port", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	sender := grbl.New(port, grbl.Options{CommandTimeout: *commandTO, IdleTimeout: *idleTO, ResetOnOpen: *reset, HomeOnStart: *home, StartupDwell: *startupDwell, Verbose: *verbose, Log: os.Stdout})
+	sender := grbl.New(port, grbl.Options{CommandTimeout: *commandTO, IdleTimeout: *idleTO, ResetOnOpen: *reset, HomeOnStart: *home, StartupDwell: *startupDwell, Verbose: *verbose, Log: os.Stdout, Logger: log})
 	defer sender.Close()
 	robot := machine.New(sender)
+	drawingSession := session.New(robot)
 	pen := machine.NewPen(robot, cfg.PenUp, cfg.PenDown)
-	recovery := newMachineRecovery(sender, robot, pen, os.Stdout, defaultRecoveryTimings)
+	recovery := newMachineRecovery(sender, drawingSession, pen, log, defaultRecoveryTimings)
 
 	if *calibrateMode {
 		if *calibrationStep <= 0 {
-			return fail("calibrate", errors.New("--calibration-step must be greater than zero"))
+			return fail(log, "calibrate", errors.New("--calibration-step must be greater than zero"))
 		}
 		if *positionStep <= 0 {
-			return fail("calibrate", errors.New("--position-step must be greater than zero"))
+			return fail(log, "calibrate", errors.New("--position-step must be greater than zero"))
 		}
 		if err := sender.Initialize(ctx); err != nil {
-			return fail("initialize GRBL", err)
+			return fail(log, "initialize GRBL", err)
 		}
-		if err := calibrate(ctx, sender, robot, pen, &cfg, *calibrationStep, *positionStep, recovery); err != nil {
-			return fail("calibrate", err)
+		if err := calibrate(ctx, sender, drawingSession, robot, pen, &cfg, *calibrationStep, *positionStep, recovery, log); err != nil {
+			return fail(log, "calibrate", err)
 		}
 		path, err := config.Save(cfg)
 		if err != nil {
-			return fail("save configuration", err)
+			return fail(log, "save configuration", err)
 		}
-		fmt.Printf("Saved calibration to %s\n", path)
-		fmt.Printf("Pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f\n", cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY)
+		log.Info(fmt.Sprintf("Saved calibration to %s", path))
+		log.Info(fmt.Sprintf("Pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f", cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY))
 		return 0
 	}
 
 	file, err := os.Open(flag.Arg(0))
 	if err != nil {
-		return fail("open G-code", err)
+		return fail(log, "open G-code", err)
 	}
 	defer file.Close()
 	lines, err := gcode.Read(file)
 	if err != nil {
-		return fail("parse G-code", err)
+		return fail(log, "parse G-code", err)
 	}
 	if len(lines) == 0 {
-		return fail("parse G-code", errors.New("file contains no commands"))
+		return fail(log, "parse G-code", errors.New("file contains no commands"))
 	}
 	for i := range lines {
 		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{PEN_DOWN}}", fmt.Sprintf("%.3f", cfg.PenDown))
@@ -115,33 +120,34 @@ func run() int {
 		lines[i].Command = strings.ReplaceAll(lines[i].Command, "{{START_Y}}", fmt.Sprintf("%.3f", cfg.StartY))
 	}
 
-	fmt.Printf("Using configuration %s (pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f)\n", cfgPath, cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY)
-	fmt.Printf("Sending %d commands to %s at %d baud\n", len(lines), *portName, *baud)
+	log.Info(fmt.Sprintf("Using configuration %s (pen up Z%.3f, pen down Z%.3f, start X%.3f Y%.3f)", cfgPath, cfg.PenUp, cfg.PenDown, cfg.StartX, cfg.StartY))
+	log.Info(fmt.Sprintf("Sending %d commands to %s at %d baud", len(lines), *portName, *baud))
 	if err := sender.Initialize(ctx); err != nil {
 		recoverAfterInterrupt(ctx, recovery, err)
-		return fail("initialize GRBL", err)
+		return fail(log, "initialize GRBL", err)
 	}
-	if err := robot.MoveMachineXYTo(ctx, cfg.StartX, cfg.StartY); err != nil {
+	if err := drawingSession.Begin(ctx, cfg.StartX, cfg.StartY); err != nil {
 		recoverAfterInterrupt(ctx, recovery, err)
-		return fail("move to paper origin", err)
+		return fail(log, "begin session", err)
 	}
-	if err := robot.SetProgramXYOrigin(ctx); err != nil {
-		recoverAfterInterrupt(ctx, recovery, err)
-		return fail("set paper origin", err)
-	}
-	fmt.Printf("Paper origin set to machine X%.3f Y%.3f; program coordinates are now relative to that point.\n", cfg.StartX, cfg.StartY)
+	log.Info(fmt.Sprintf("Paper origin set to machine X%.3f Y%.3f; program coordinates are now relative to that point.", cfg.StartX, cfg.StartY))
 	if err := sender.Send(ctx, lines); err != nil {
 		recoverAfterInterrupt(ctx, recovery, err)
-		return fail("stream G-code", err)
+		return fail(log, "stream G-code", err)
 	}
 	if *waitIdle {
-		fmt.Println("Waiting for machine to become Idle...")
+		log.Info("Waiting for machine to become Idle...")
 		if err := sender.WaitIdle(ctx); err != nil {
 			recoverAfterInterrupt(ctx, recovery, err)
-			return fail("wait for completion", err)
+			return fail(log, "wait for completion", err)
 		}
 	}
-	fmt.Println("Done.")
+	if err := drawingSession.End(ctx); err != nil {
+		recoverAfterInterrupt(ctx, recovery, err)
+		return fail(log, "end session", err)
+	}
+	log.Info("Session ended; temporary program origin cleared.")
+	log.Info("Done.")
 	return 0
 }
 
@@ -183,9 +189,9 @@ type recoveryReport struct {
 
 type machineRecovery struct {
 	sender  *grbl.Sender
-	machine *machine.Machine
+	session *session.Session
 	pen     *machine.Pen
-	log     io.Writer
+	log     console.Logger
 	timings recoveryTimings
 
 	mu       sync.Mutex
@@ -194,11 +200,11 @@ type machineRecovery struct {
 	finished bool
 }
 
-func newMachineRecovery(sender *grbl.Sender, robot *machine.Machine, pen *machine.Pen, log io.Writer, timings recoveryTimings) *machineRecovery {
+func newMachineRecovery(sender *grbl.Sender, drawingSession *session.Session, pen *machine.Pen, log console.Logger, timings recoveryTimings) *machineRecovery {
 	if log == nil {
-		log = io.Discard
+		log = console.New(io.Discard)
 	}
-	return &machineRecovery{sender: sender, machine: robot, pen: pen, log: log, timings: timings}
+	return &machineRecovery{sender: sender, session: drawingSession, pen: pen, log: log, timings: timings}
 }
 
 func recoverAfterInterrupt(ctx context.Context, recovery *machineRecovery, err error) {
@@ -236,17 +242,17 @@ func (r *machineRecovery) run(feedHold bool) recoveryReport {
 		report.feedHoldSent = true
 		report.feedHoldErr = r.sender.FeedHold()
 		if report.feedHoldErr != nil {
-			fmt.Fprintf(r.log, "Recovery: feed hold could not be sent: %v\n", report.feedHoldErr)
+			r.log.Warn(fmt.Sprintf("Recovery: feed hold could not be sent: %v", report.feedHoldErr))
 		} else {
-			fmt.Fprintln(r.log, "Recovery: feed hold sent.")
+			r.log.Info("Recovery: feed hold sent.")
 			state, _, err := r.waitForState(r.timings.holdWait, "Hold", "Idle")
 			if err != nil {
 				report.stopStateErr = err
-				fmt.Fprintf(r.log, "Recovery: GRBL stop/Hold state could not be confirmed: %v\n", err)
+				r.log.Warn(fmt.Sprintf("Recovery: GRBL stop/Hold state could not be confirmed: %v", err))
 			} else {
 				report.stopStateConfirmed = true
 				report.stopState = state
-				fmt.Fprintf(r.log, "Recovery: GRBL reported state %s.\n", state)
+				r.log.Info(fmt.Sprintf("Recovery: GRBL reported state %s.", state))
 			}
 		}
 	}
@@ -259,47 +265,47 @@ func (r *machineRecovery) run(feedHold bool) recoveryReport {
 		cancel()
 		if report.resetErr != nil {
 			if strings.Contains(report.resetErr.Error(), "soft reset:") {
-				fmt.Fprintf(r.log, "Recovery: GRBL reset could not be sent: %v\n", report.resetErr)
+				r.log.Warn(fmt.Sprintf("Recovery: GRBL reset could not be sent: %v", report.resetErr))
 			} else {
-				fmt.Fprintf(r.log, "Recovery: GRBL reset sent, but startup was not confirmed: %v\n", report.resetErr)
+				r.log.Warn(fmt.Sprintf("Recovery: GRBL reset sent, but startup was not confirmed: %v", report.resetErr))
 			}
 			report.penUpSkippedReason = "ordinary G-code may not execute safely after feed hold when reset fails"
-			fmt.Fprintf(r.log, "Recovery: pen-up was not attempted because %s.\n", report.penUpSkippedReason)
+			r.log.Warn(fmt.Sprintf("Recovery: pen-up was not attempted because %s.", report.penUpSkippedReason))
 			return r.finish(report)
 		}
-		fmt.Fprintln(r.log, "Recovery: GRBL reset sent and startup confirmed.")
+		r.log.Info("Recovery: GRBL reset sent and startup confirmed.")
 
 		report.unlockAttempted = true
 		unlockCtx, cancel := context.WithTimeout(context.Background(), r.timings.commandWait)
 		report.unlockErr = r.sender.Command(unlockCtx, "$X")
 		cancel()
 		if report.unlockErr != nil {
-			fmt.Fprintf(r.log, "Recovery: GRBL alarm unlock was attempted but failed: %v\n", report.unlockErr)
+			r.log.Warn(fmt.Sprintf("Recovery: GRBL alarm unlock was attempted but failed: %v", report.unlockErr))
 		}
 	}
 
 	report.penUpAttempted = true
-	fmt.Fprintf(r.log, "Recovery: pen-up attempted at Z%.3f.\n", r.pen.UpZ())
-	if err := r.runWithCommandTimeout(r.machine.SetUnitsMillimeters); err != nil {
-		report.penUpErr = fmt.Errorf("set millimeters before pen-up: %w", err)
-		fmt.Fprintf(r.log, "Recovery: pen-up failed: %v\n", report.penUpErr)
+	r.log.Info(fmt.Sprintf("Recovery: pen-up attempted at Z%.3f.", r.pen.UpZ()))
+	if err := r.runWithCommandTimeout(r.session.PrepareInterruptedRecovery); err != nil {
+		report.penUpErr = fmt.Errorf("prepare modal state before pen-up: %w", err)
+		r.log.Warn(fmt.Sprintf("Recovery: pen-up failed: %v", report.penUpErr))
 		return r.finish(report)
 	}
 	if err := r.runWithCommandTimeout(r.pen.Raise); err != nil {
 		report.penUpErr = err
-		fmt.Fprintf(r.log, "Recovery: pen-up failed: %v\n", err)
+		r.log.Warn(fmt.Sprintf("Recovery: pen-up failed: %v", err))
 		return r.finish(report)
 	}
-	fmt.Fprintln(r.log, "Recovery: pen-up command accepted by GRBL.")
+	r.log.Info("Recovery: pen-up command accepted by GRBL.")
 
 	state, _, err := r.waitForState(r.timings.finalStateWait, "Idle")
 	if err != nil {
 		report.finalStateErr = err
-		fmt.Fprintf(r.log, "Recovery: final machine state could not be confirmed: %v\n", err)
+		r.log.Warn(fmt.Sprintf("Recovery: final machine state could not be confirmed: %v", err))
 	} else {
 		report.finalConfirmed = true
 		report.finalState = state
-		fmt.Fprintf(r.log, "Recovery: final GRBL state confirmed as %s.\n", state)
+		r.log.Info(fmt.Sprintf("Recovery: final GRBL state confirmed as %s.", state))
 	}
 
 	return r.finish(report)
@@ -333,14 +339,14 @@ func stateBase(state string) string {
 	return state
 }
 
-func calibrate(ctx context.Context, sender *grbl.Sender, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, penStep, positionStep float64, recovery *machineRecovery) error {
+func calibrate(ctx context.Context, sender *grbl.Sender, drawingSession *session.Session, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, penStep, positionStep float64, recovery *machineRecovery, log console.Logger) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("standard input is not an interactive terminal")
 	}
-	if err := robot.SetUnitsMillimeters(ctx); err != nil {
+	if err := drawingSession.EstablishModalState(ctx); err != nil {
 		return err
 	}
-	if err := sender.Command(ctx, "G90"); err != nil {
+	if err := robot.ClearProgramOffset(ctx); err != nil {
 		return err
 	}
 
@@ -350,17 +356,17 @@ func calibrate(ctx context.Context, sender *grbl.Sender, robot *machine.Machine,
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	if err := calibratePen(ctx, pen, cfg, penStep, recovery); err != nil {
+	if err := calibratePen(ctx, pen, cfg, penStep, recovery, log); err != nil {
 		return err
 	}
-	return calibrateStartPosition(ctx, sender, robot, pen, cfg, positionStep, recovery)
+	return calibrateStartPosition(ctx, sender, drawingSession, robot, pen, cfg, positionStep, recovery, log)
 }
 
-func calibratePen(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery) error {
-	return calibratePenFrom(ctx, pen, cfg, step, recovery, os.Stdin)
+func calibratePen(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, log console.Logger) error {
+	return calibratePenFrom(ctx, pen, cfg, step, recovery, os.Stdin, log)
 }
 
-func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader) (err error) {
+func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader, log console.Logger) (err error) {
 	z := cfg.PenDown
 	if err := pen.MoveTo(ctx, z, machine.DefaultPenLowerFeed); err != nil {
 		return err
@@ -372,8 +378,8 @@ func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config,
 		}
 	}()
 
-	fmt.Printf("\r\nStep 1 of 2: pen-down calibration (current Z%.3f)\r\n", z)
-	fmt.Printf("Down arrow: lower (+%.3f mm) | Up arrow: raise (-%.3f mm) | Enter: accept | Esc/Ctrl-C: cancel\r\n", step, step)
+	log.Info(fmt.Sprintf("Step 1 of 2: pen-down calibration (current Z%.3f)", z))
+	log.Info(fmt.Sprintf("Down arrow: lower (+%.3f mm) | Up arrow: raise (-%.3f mm) | Enter: accept | Esc/Ctrl-C: cancel", step, step))
 	for {
 		key, err := readKey(input)
 		if err != nil {
@@ -387,7 +393,7 @@ func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config,
 				return err
 			}
 			penDown = false
-			fmt.Printf("\r\nSelected pen-down Z%.3f; pen raised.\r\n", z)
+			log.Info(fmt.Sprintf("Selected pen-down Z%.3f; pen raised.", z))
 			return nil
 		case keyCancel:
 			return context.Canceled
@@ -404,15 +410,15 @@ func calibratePenFrom(ctx context.Context, pen *machine.Pen, cfg *config.Config,
 		if err := pen.MoveTo(ctx, z, machine.DefaultPenLowerFeed); err != nil {
 			return err
 		}
-		fmt.Printf("\rZ%.3f   ", z)
+		log.Info(fmt.Sprintf("Pen-down candidate Z%.3f", z))
 	}
 }
 
-func calibrateStartPosition(ctx context.Context, streamer gcodeStreamer, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery) error {
-	return calibrateStartPositionFrom(ctx, streamer, robot, pen, cfg, step, recovery, os.Stdin)
+func calibrateStartPosition(ctx context.Context, streamer gcodeStreamer, drawingSession *session.Session, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, log console.Logger) error {
+	return calibrateStartPositionFrom(ctx, streamer, drawingSession, robot, pen, cfg, step, recovery, os.Stdin, log)
 }
 
-func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader) (err error) {
+func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, drawingSession *session.Session, robot *machine.Machine, pen *machine.Pen, cfg *config.Config, step float64, recovery *machineRecovery, input io.Reader, log console.Logger) (err error) {
 	x, y := cfg.StartX, cfg.StartY
 	penDown := false
 	defer func() {
@@ -424,9 +430,9 @@ func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, rob
 		return err
 	}
 
-	fmt.Printf("\r\nStep 2 of 2: starting-position calibration\r\n")
-	fmt.Printf("Arrow keys: move %.3f mm | U: pen up | D: pen down | Enter: set origin | Esc/Ctrl-C: cancel\r\n", step)
-	fmt.Printf("X%.3f Y%.3f | pen UP\r\n", x, y)
+	log.Info("Step 2 of 2: starting-position calibration")
+	log.Info(fmt.Sprintf("Arrow keys: move %.3f mm | U: pen up | D: pen down | Enter: set origin | Esc/Ctrl-C: cancel", step))
+	log.Info(fmt.Sprintf("Start candidate X%.3f Y%.3f | pen UP", x, y))
 	for {
 		key, err := readKey(input)
 		if err != nil {
@@ -438,13 +444,23 @@ func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, rob
 				if err := pen.Raise(ctx); err != nil {
 					return err
 				}
+				penDown = false
 			}
 			cfg.StartX, cfg.StartY = x, y
-			if err := robot.SetProgramXYOrigin(ctx); err != nil {
+			if err := drawingSession.Begin(ctx, x, y); err != nil {
 				return err
 			}
-			fmt.Printf("\r\nSelected start X%.3f Y%.3f; program origin set and pen raised.\r\n", x, y)
-			return calibrateDiagnosticsFrom(ctx, streamer, cfg, recovery, input)
+			log.Info(fmt.Sprintf("Selected start X%.3f Y%.3f; program origin set and pen raised.", x, y))
+			diagnosticsErr := calibrateDiagnosticsFrom(ctx, streamer, cfg, recovery, input, log)
+			var endErr error
+			if ctx.Err() == nil {
+				endErr = drawingSession.End(ctx)
+			}
+			if diagnosticsErr != nil || endErr != nil {
+				return errors.Join(diagnosticsErr, endErr)
+			}
+			log.Info("Calibration drawing session ended; temporary program origin cleared.")
+			return nil
 		case keyCancel:
 			return context.Canceled
 		case keyLeft:
@@ -460,14 +476,14 @@ func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, rob
 				return err
 			}
 			penDown = false
-			fmt.Printf("\rX%.3f Y%.3f | pen UP     ", x, y)
+			log.Info(fmt.Sprintf("Start candidate X%.3f Y%.3f | pen UP", x, y))
 			continue
 		case keyPenDown:
 			if err := pen.Lower(ctx); err != nil {
 				return err
 			}
 			penDown = true
-			fmt.Printf("\rX%.3f Y%.3f | pen DOWN   ", x, y)
+			log.Info(fmt.Sprintf("Start candidate X%.3f Y%.3f | pen DOWN", x, y))
 			continue
 		default:
 			continue
@@ -490,19 +506,19 @@ func calibrateStartPositionFrom(ctx context.Context, streamer gcodeStreamer, rob
 		if penDown {
 			state = "DOWN"
 		}
-		fmt.Printf("\rX%.3f Y%.3f | pen %-4s   ", x, y, state)
+		log.Info(fmt.Sprintf("Start candidate X%.3f Y%.3f | pen %s", x, y, state))
 	}
 }
 
-func calibrateDiagnosticsFrom(ctx context.Context, streamer gcodeStreamer, cfg *config.Config, recovery *machineRecovery, input io.Reader) error {
+func calibrateDiagnosticsFrom(ctx context.Context, streamer gcodeStreamer, cfg *config.Config, recovery *machineRecovery, input io.Reader, log console.Logger) error {
 	for {
-		printDiagnosticMenu()
+		printDiagnosticMenu(log)
 		key, err := readKey(input)
 		if err != nil {
 			return err
 		}
 		if key == keyEnter {
-			fmt.Printf("\r\nDiagnostics complete.\r\n")
+			log.Info("Diagnostics complete.")
 			return nil
 		}
 		if key == keyCancel {
@@ -518,23 +534,23 @@ func calibrateDiagnosticsFrom(ctx context.Context, streamer gcodeStreamer, cfg *
 		if err != nil {
 			return fmt.Errorf("generate %s: %w", pattern.Name(), err)
 		}
-		fmt.Printf("\r\nDrawing %s...\r\n", pattern.Name())
+		log.Info(fmt.Sprintf("Drawing %s...", pattern.Name()))
 		if err := streamer.Send(ctx, lines); err != nil {
 			recoverAfterInterrupt(ctx, recovery, err)
 			return fmt.Errorf("draw %s: %w", pattern.Name(), err)
 		}
-		fmt.Printf("Finished %s; pen raised at program origin.\r\n", pattern.Name())
+		log.Info(fmt.Sprintf("Finished %s; pen raised at program origin.", pattern.Name()))
 	}
 }
 
-func printDiagnosticMenu() {
-	fmt.Printf("\r\nOptional diagnostics from calibrated program origin:\r\n")
+func printDiagnosticMenu(log console.Logger) {
+	log.Info("Optional diagnostics from calibrated program origin:")
 	labels := make([]string, 0, len(diagnosticChoices)+1)
 	for _, choice := range diagnosticChoices {
 		labels = append(labels, choice.label)
 	}
 	labels = append(labels, "Enter: save", "Esc/Ctrl-C: cancel")
-	fmt.Printf("%s\r\n", strings.Join(labels, " | "))
+	log.Info(strings.Join(labels, " | "))
 }
 
 func diagnosticPattern(key key) (diagnostics.Pattern, bool) {
@@ -631,15 +647,18 @@ func readKey(r io.Reader) (key, error) {
 	}
 }
 
-func fail(action string, err error) int {
+func fail(log console.Logger, action string, err error) int {
+	if log == nil {
+		log = console.New(os.Stderr)
+	}
 	if errors.Is(err, context.Canceled) {
-		fmt.Fprintln(os.Stderr, "Interrupted.")
+		log.Warn("Interrupted.")
 		return 130
 	}
 	if errors.Is(err, io.EOF) {
-		fmt.Fprintf(os.Stderr, "%s: serial connection closed\n", action)
+		log.Error(fmt.Errorf("%s: serial connection closed", action))
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "%s: %v\n", action, err)
+	log.Error(fmt.Errorf("%s: %w", action, err))
 	return 1
 }
