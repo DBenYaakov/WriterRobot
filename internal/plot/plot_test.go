@@ -2,6 +2,7 @@ package plot
 
 import (
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -220,6 +221,92 @@ func TestPlanSelectsNearestStroke(t *testing.T) {
 	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}, {X: 3, Y: 0}, {X: 100, Y: 0}})
 }
 
+func TestPlanDoesNotSelectNearestStrokeOutsideLookaheadWindow(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 100, Y: 0}, {X: 101, Y: 0}}},
+		{Points: []drawing.Point{{X: 90, Y: 0}, {X: 91, Y: 0}}},
+		{Points: []drawing.Point{{X: 80, Y: 0}, {X: 81, Y: 0}}},
+		{Points: []drawing.Point{{X: 1, Y: 0}, {X: 2, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if got, want := rapidMovePoints(ops)[0], (drawing.Point{X: 80, Y: 0}); got != want {
+		t.Fatalf("first selected stroke = %+v, want nearest stroke inside lookahead window %+v", got, want)
+	}
+}
+
+func TestPlanSelectsOldestStrokeAfterMaximumDeferral(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 100, Y: 0}, {X: 101, Y: 0}}},
+		{Points: []drawing.Point{{X: 1, Y: 0}, {X: 2, Y: 0}}},
+		{Points: []drawing.Point{{X: 3, Y: 0}, {X: 4, Y: 0}}},
+		{Points: []drawing.Point{{X: 5, Y: 0}, {X: 6, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	assertPoints(t, firstN(rapidMovePoints(ops), 3), []drawing.Point{{X: 1, Y: 0}, {X: 3, Y: 0}, {X: 100, Y: 0}})
+}
+
+func TestPlanDeferralAccountingOnlyIncrementsEarlierSkippedStrokes(t *testing.T) {
+	remaining := []plannedStroke{
+		{order: 0},
+		{order: 1},
+		{order: 2},
+		{order: 3},
+	}
+
+	got, selected := removeSelectedStroke(remaining, 2)
+
+	if selected.order != 2 {
+		t.Fatalf("selected order = %d, want 2", selected.order)
+	}
+	want := []plannedStroke{
+		{order: 0, deferrals: 1},
+		{order: 1, deferrals: 1},
+		{order: 3, deferrals: 0},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("remaining = %+v, want %+v", got, want)
+	}
+}
+
+func TestPlanDoesNotBypassAnyStrokeMoreThanMaximumDeferral(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 100, Y: 0}, {X: 101, Y: 0}}},
+		{Points: []drawing.Point{{X: 1, Y: 0}, {X: 2, Y: 0}}},
+		{Points: []drawing.Point{{X: 3, Y: 0}, {X: 4, Y: 0}}},
+		{Points: []drawing.Point{{X: 5, Y: 0}, {X: 6, Y: 0}}},
+		{Points: []drawing.Point{{X: 7, Y: 0}, {X: 8, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	position := indexOfPoint(rapidMovePoints(ops), drawing.Point{X: 100, Y: 0})
+	if position < 0 {
+		t.Fatalf("oldest stroke was not plotted: %+v", rapidMovePoints(ops))
+	}
+	if position > maximumDeferral {
+		t.Fatalf("oldest stroke was bypassed %d times, want at most %d", position, maximumDeferral)
+	}
+}
+
 func TestPlanBreaksNearestNeighborTiesByDocumentOrder(t *testing.T) {
 	opts := DefaultOptions(0.5, 1.7)
 	opts.ReturnToOrigin = false
@@ -253,6 +340,32 @@ func TestPlanNearestNeighborUsesStrokeReversal(t *testing.T) {
 
 	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}, {X: 100, Y: 0}})
 	assertPoints(t, firstN(drawMovePoints(ops), 1), []drawing.Point{{X: 50, Y: 0}})
+}
+
+func TestPlanComparesClosedPathsFromNearestEntryPoint(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 10, Y: 0}, {X: 11, Y: 0}}},
+		{
+			Points: []drawing.Point{
+				{X: 100, Y: 0},
+				{X: 1, Y: 0},
+				{X: 100, Y: -10},
+				{X: 100, Y: 0},
+			},
+			Closed: true,
+		},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if got, want := rapidMovePoints(ops)[0], (drawing.Point{X: 1, Y: 0}); got != want {
+		t.Fatalf("first selected entry = %+v, want closed-path nearest entry %+v", got, want)
+	}
 }
 
 func TestPlanUsesOriginalStrokeDirectionWhenStartNearer(t *testing.T) {
@@ -304,6 +417,210 @@ func TestPlanPreservesOriginalDirectionWhenEndpointDistancesAreEqualWithinTolera
 	assertPoints(t, drawMovePoints(ops), []drawing.Point{{X: 1 - delta, Y: 0}})
 }
 
+func TestPlanSelectsNearestClosedPathVertex(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 20, Y: 0},
+			{X: 20, Y: -10},
+			{X: 1, Y: 0},
+			{X: 20, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}})
+}
+
+func TestPlanRotatesClosedPathAndPreservesClosure(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 10, Y: 0},
+			{X: 10, Y: -10},
+			{X: 1, Y: -1},
+			{X: 0, Y: -10},
+			{X: 10, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	want := []drawing.Point{
+		{X: 0, Y: -10},
+		{X: 10, Y: 0},
+		{X: 10, Y: -10},
+		{X: 1, Y: -1},
+	}
+	assertPoints(t, drawMovePoints(ops), want)
+	draws := drawMovePoints(ops)
+	entry := rapidMovePoints(ops)[0]
+	if draws[len(draws)-1] != entry {
+		t.Fatalf("rotated closed path ended at %+v, want entry point %+v", draws[len(draws)-1], entry)
+	}
+}
+
+func TestPlanPreservesClosedPathOrientation(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 10, Y: 0},
+			{X: 10, Y: -10},
+			{X: 1, Y: -1},
+			{X: 0, Y: -10},
+			{X: 10, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	want := []testSegment{
+		{a: drawing.Point{X: 1, Y: -1}, b: drawing.Point{X: 0, Y: -10}},
+		{a: drawing.Point{X: 0, Y: -10}, b: drawing.Point{X: 10, Y: 0}},
+		{a: drawing.Point{X: 10, Y: 0}, b: drawing.Point{X: 10, Y: -10}},
+		{a: drawing.Point{X: 10, Y: -10}, b: drawing.Point{X: 1, Y: -1}},
+	}
+	if got := drawnOrientedSegments(ops); !sameOrientedSegments(got, want) {
+		t.Fatalf("oriented segments = %+v, want %+v", got, want)
+	}
+}
+
+func TestPlanPreservesClosedPathGeometryAfterRotation(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 10, Y: 0},
+			{X: 10, Y: -10},
+			{X: 1, Y: -1},
+			{X: 0, Y: -10},
+			{X: 10, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if got, want := drawnSegments(ops), drawingSegments(d); !sameSegments(got, want) {
+		t.Fatalf("drawn segments = %+v, want same geometry as %+v", got, want)
+	}
+}
+
+func TestPlanBreaksClosedPathVertexTiesByOriginalVertexOrder(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 1, Y: 0},
+			{X: 0, Y: 1},
+			{X: 5, Y: 0},
+			{X: 1, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}})
+}
+
+func TestPlanBreaksClosedPathSelectionTiesByDocumentOrder(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{
+			Points: []drawing.Point{
+				{X: 10, Y: 0},
+				{X: 1, Y: 0},
+				{X: 10, Y: -10},
+				{X: 10, Y: 0},
+			},
+			Closed: true,
+		},
+		{
+			Points: []drawing.Point{
+				{X: -10, Y: 0},
+				{X: 0, Y: 1},
+				{X: -10, Y: -10},
+				{X: -10, Y: 0},
+			},
+			Closed: true,
+		},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if got, want := rapidMovePoints(ops)[0], (drawing.Point{X: 1, Y: 0}); got != want {
+		t.Fatalf("first selected closed path entry = %+v, want document-order tie winner %+v", got, want)
+	}
+}
+
+func TestPlanClosedPathEntryDoesNotAffectOpenPaths(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 10, Y: 0}, {X: 1, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}})
+	assertPoints(t, drawMovePoints(ops), []drawing.Point{{X: 10, Y: 0}})
+}
+
+func TestPlanReducesPenUpTravelToClosedPath(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{{
+		Points: []drawing.Point{
+			{X: 100, Y: 0},
+			{X: 100, Y: -10},
+			{X: 1, Y: 0},
+			{X: 100, Y: 0},
+		},
+		Closed: true,
+	}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	got := penUpTravelDistance(ops)
+	fixedStart := distance(drawing.Point{}, d.Strokes[0].Points[0])
+	if !(got < fixedStart) {
+		t.Fatalf("pen-up travel = %.6f, want less than fixed-start %.6f", got, fixedStart)
+	}
+}
+
 func TestPlanNeverReversesClosedPaths(t *testing.T) {
 	opts := DefaultOptions(0.5, 1.7)
 	opts.ReturnToOrigin = false
@@ -319,8 +636,8 @@ func TestPlanNeverReversesClosedPaths(t *testing.T) {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 10, Y: 0}})
-	assertPoints(t, drawMovePoints(ops), []drawing.Point{{X: 5, Y: -5}, {X: 1, Y: 0}, {X: 10, Y: 0}})
+	assertPoints(t, rapidMovePoints(ops), []drawing.Point{{X: 1, Y: 0}})
+	assertPoints(t, drawMovePoints(ops), []drawing.Point{{X: 10, Y: 0}, {X: 5, Y: -5}, {X: 1, Y: 0}})
 }
 
 func TestPlanUsesCurrentPositionWhenReversingStrokeDirection(t *testing.T) {
@@ -419,6 +736,65 @@ func TestPlanPreservesGeneratedDrawingGeometryWhenReversing(t *testing.T) {
 	}
 }
 
+func TestPlanConstrainedNearestNeighborKeepsEarlyStrokeNearSourceOrder(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 100, Y: 0}, {X: 101, Y: 0}}},
+		{Points: []drawing.Point{{X: 1, Y: 0}, {X: 2, Y: 0}}},
+		{Points: []drawing.Point{{X: 3, Y: 0}, {X: 4, Y: 0}}},
+		{Points: []drawing.Point{{X: 5, Y: 0}, {X: 6, Y: 0}}},
+		{Points: []drawing.Point{{X: 7, Y: 0}, {X: 8, Y: 0}}},
+		{Points: []drawing.Point{{X: 9, Y: 0}, {X: 10, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	position := indexOfPoint(rapidMovePoints(ops), drawing.Point{X: 100, Y: 0})
+	if position < 0 {
+		t.Fatalf("early source-order stroke was not plotted: %+v", rapidMovePoints(ops))
+	}
+	if position > maximumDeferral {
+		t.Fatalf("early source-order stroke plotted at position %d, want no later than %d", position, maximumDeferral)
+	}
+}
+
+func TestPlanIsDeterministic(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 100, Y: 0}, {X: 101, Y: 0}}},
+		{Points: []drawing.Point{{X: 1, Y: 0}, {X: 2, Y: 0}}},
+		{Points: []drawing.Point{{X: 20, Y: 0}, {X: 4, Y: 0}}},
+		{
+			Points: []drawing.Point{
+				{X: 50, Y: 0},
+				{X: 6, Y: 0},
+				{X: 50, Y: -10},
+				{X: 50, Y: 0},
+			},
+			Closed: true,
+		},
+	})
+
+	want, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for i := 0; i < 25; i++ {
+		got, err := Plan(d, opts)
+		if err != nil {
+			t.Fatalf("Plan run %d: %v", i+1, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Plan run %d = %+v, want deterministic %+v", i+1, got, want)
+		}
+	}
+}
+
 func TestPlanRejectsInvalidGeometryBeforeOperations(t *testing.T) {
 	_, err := Plan(drawing.Drawing{
 		Strokes: []drawing.Stroke{{Points: []drawing.Point{{X: 0, Y: 0}}}},
@@ -507,6 +883,15 @@ func firstN(points []drawing.Point, n int) []drawing.Point {
 	return points[:n]
 }
 
+func indexOfPoint(points []drawing.Point, want drawing.Point) int {
+	for i, point := range points {
+		if point == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func assertPoints(t *testing.T, got, want []drawing.Point) {
 	t.Helper()
 	if !samePoints(got, want) {
@@ -575,6 +960,28 @@ func drawnSegments(ops []Operation) []testSegment {
 	return segments
 }
 
+func drawnOrientedSegments(ops []Operation) []testSegment {
+	current := drawing.Point{}
+	penDown := false
+	var segments []testSegment
+	for _, op := range ops {
+		switch op.Kind {
+		case OperationPenDown:
+			penDown = true
+		case OperationPenUp:
+			penDown = false
+		case OperationRapidMove:
+			current = op.Point
+		case OperationDrawMove:
+			if penDown {
+				segments = append(segments, testSegment{a: current, b: op.Point})
+			}
+			current = op.Point
+		}
+	}
+	return segments
+}
+
 func strokeSegments(stroke drawing.Stroke) []testSegment {
 	segments := make([]testSegment, 0, len(stroke.Points)-1)
 	for i := 1; i < len(stroke.Points); i++ {
@@ -595,8 +1002,8 @@ func documentOrderPenUpTravel(d drawing.Drawing, opts Options) float64 {
 	opts = opts.withDefaults()
 	current := drawing.Point{}
 	total := 0.0
-	for _, stroke := range mergeContiguousStrokes(d.Strokes, opts.ContiguousTolerance) {
-		stroke = orientStroke(stroke, current, opts.ContiguousTolerance)
+	for _, entry := range remainingStrokes(d.Strokes, opts.ContiguousTolerance) {
+		stroke := chooseStrokeEntry(entry.stroke, current, opts.ContiguousTolerance)
 		total += distance(current, stroke.Points[0])
 		current = strokeEnd(stroke)
 	}
@@ -633,6 +1040,18 @@ func sameSegments(a, b []testSegment) bool {
 	}
 	for _, count := range counts {
 		if count != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sameOrientedSegments(a, b []testSegment) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

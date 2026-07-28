@@ -1,14 +1,17 @@
 // Package plot plans pen and XY motion for processed drawings.
 //
 // It first merges consecutive open strokes whose endpoints are already
-// contiguous, then uses a deterministic nearest-neighbor pass to choose the next
-// stroke. Each candidate open stroke may be drawn in reverse when its endpoint
-// is closer to the current pen position; closed strokes keep their original
-// orientation. Equal-distance ties preserve original document order and original
-// stroke direction. The planner inserts pen-up travel between disconnected
-// strokes, lowers the pen only for drawing moves, and returns an ordered list of
-// operations. It does not format G-code or know about GRBL, sessions, serial
-// transport, SVG, or CLI flags.
+// contiguous, then uses deterministic constrained nearest-neighbor planning. At
+// each step it considers only the first three remaining source-order strokes,
+// and a stroke that has been bypassed twice becomes mandatory. Each candidate
+// open stroke may be drawn in reverse when its endpoint is closer to the current
+// pen position. Closed strokes keep their original orientation, but rotate to
+// enter at the nearest vertex. Equal-distance ties preserve original document
+// order, original stroke direction, and the earliest closed-path vertex. The
+// planner inserts pen-up travel between disconnected strokes, lowers the pen
+// only for drawing moves, and returns an ordered list of operations. It does not
+// format G-code or know about GRBL, sessions, serial transport, SVG, or CLI
+// flags.
 package plot
 
 import (
@@ -21,6 +24,8 @@ import (
 
 const (
 	defaultDrawFeed = 600
+	lookaheadWindow = 3
+	maximumDeferral = 2
 
 	// DefaultContiguousTolerance is the maximum endpoint distance in each axis
 	// for consecutive open strokes to be planned as one continuous stroke. It
@@ -89,13 +94,13 @@ func Plan(d drawing.Drawing, opts Options) ([]Operation, error) {
 		Z:    opts.PenUpZ,
 		Feed: opts.PenRaiseFeed,
 	}}
-	remaining := remainingStrokes(mergeContiguousStrokes(d.Strokes, opts.ContiguousTolerance))
+	remaining := remainingStrokes(d.Strokes, opts.ContiguousTolerance)
 	current := drawing.Point{}
 	for len(remaining) > 0 {
-		selected := nearestStrokeIndex(remaining, current, opts.ContiguousTolerance)
-		entry := remaining[selected]
-		remaining = append(remaining[:selected], remaining[selected+1:]...)
-		stroke := orientStroke(entry.stroke, current, opts.ContiguousTolerance)
+		selected := selectStrokeIndex(remaining, current, opts.ContiguousTolerance)
+		var entry plannedStroke
+		remaining, entry = removeSelectedStroke(remaining, selected)
+		stroke := chooseStrokeEntry(entry.stroke, current, opts.ContiguousTolerance)
 		if len(stroke.Points) < 2 {
 			return nil, fmt.Errorf("stroke %d contains fewer than two points", entry.order+1)
 		}
@@ -132,24 +137,37 @@ func drawablePoints(stroke drawing.Stroke) []drawing.Point {
 }
 
 type plannedStroke struct {
-	stroke drawing.Stroke
-	order  int
+	stroke    drawing.Stroke
+	order     int
+	deferrals int
 }
 
-func remainingStrokes(strokes []drawing.Stroke) []plannedStroke {
-	remaining := make([]plannedStroke, len(strokes))
+func remainingStrokes(strokes []drawing.Stroke, tolerance float64) []plannedStroke {
+	remaining := make([]plannedStroke, 0, len(strokes))
 	for i, stroke := range strokes {
-		remaining[i] = plannedStroke{stroke: stroke, order: i}
+		if len(remaining) == 0 {
+			remaining = append(remaining, plannedStroke{stroke: cloneStroke(stroke), order: i})
+			continue
+		}
+		last := &remaining[len(remaining)-1]
+		if canMerge(last.stroke, stroke, tolerance) {
+			last.stroke.Points = append(last.stroke.Points, stroke.Points[1:]...)
+			continue
+		}
+		remaining = append(remaining, plannedStroke{stroke: cloneStroke(stroke), order: i})
 	}
 	return remaining
 }
 
-func nearestStrokeIndex(remaining []plannedStroke, current drawing.Point, tolerance float64) int {
+func selectStrokeIndex(remaining []plannedStroke, current drawing.Point, tolerance float64) int {
+	if remaining[0].deferrals >= maximumDeferral {
+		return 0
+	}
 	bestIndex := 0
 	bestDistance := strokeTravelDistance(remaining[0].stroke, current, tolerance)
-	for i := 1; i < len(remaining); i++ {
+	for i := 1; i < candidateCount(remaining); i++ {
 		candidateDistance := strokeTravelDistance(remaining[i].stroke, current, tolerance)
-		if candidateDistance+tolerance < bestDistance {
+		if betterStrokeCandidate(candidateDistance, bestDistance, remaining[i], remaining[bestIndex], tolerance) {
 			bestIndex = i
 			bestDistance = candidateDistance
 		}
@@ -157,9 +175,41 @@ func nearestStrokeIndex(remaining []plannedStroke, current drawing.Point, tolera
 	return bestIndex
 }
 
+func candidateCount(remaining []plannedStroke) int {
+	if len(remaining) < lookaheadWindow {
+		return len(remaining)
+	}
+	return lookaheadWindow
+}
+
+func betterStrokeCandidate(candidateDistance, bestDistance float64, candidate, best plannedStroke, tolerance float64) bool {
+	if candidateDistance+tolerance < bestDistance {
+		return true
+	}
+	return math.Abs(candidateDistance-bestDistance) <= tolerance && candidate.order < best.order
+}
+
+func removeSelectedStroke(remaining []plannedStroke, selected int) ([]plannedStroke, plannedStroke) {
+	entry := remaining[selected]
+	for i := 0; i < selected; i++ {
+		remaining[i].deferrals++
+	}
+	remaining = append(remaining[:selected], remaining[selected+1:]...)
+	return remaining, entry
+}
+
 func strokeTravelDistance(stroke drawing.Stroke, current drawing.Point, tolerance float64) float64 {
-	stroke = orientStroke(stroke, current, tolerance)
-	return distance(current, stroke.Points[0])
+	if stroke.Closed {
+		return distance(current, stroke.Points[nearestClosedVertexIndex(stroke, current, tolerance)])
+	}
+	return distance(current, orientStroke(stroke, current, tolerance).Points[0])
+}
+
+func chooseStrokeEntry(stroke drawing.Stroke, current drawing.Point, tolerance float64) drawing.Stroke {
+	if stroke.Closed {
+		return rotateClosedStroke(stroke, nearestClosedVertexIndex(stroke, current, tolerance))
+	}
+	return orientStroke(stroke, current, tolerance)
 }
 
 func orientStroke(stroke drawing.Stroke, current drawing.Point, tolerance float64) drawing.Stroke {
@@ -193,22 +243,53 @@ func strokeEnd(stroke drawing.Stroke) drawing.Point {
 	return stroke.Points[len(stroke.Points)-1]
 }
 
-func mergeContiguousStrokes(strokes []drawing.Stroke, tolerance float64) []drawing.Stroke {
-	if len(strokes) < 2 {
-		return strokes
+func nearestClosedVertexIndex(stroke drawing.Stroke, current drawing.Point, tolerance float64) int {
+	vertexCount := closedVertexCount(stroke)
+	bestIndex := 0
+	bestDistance := distance(current, stroke.Points[0])
+	for i := 1; i < vertexCount; i++ {
+		candidateDistance := distance(current, stroke.Points[i])
+		if candidateDistance+tolerance < bestDistance {
+			bestIndex = i
+			bestDistance = candidateDistance
+		}
 	}
-	merged := make([]drawing.Stroke, 0, len(strokes))
-	for _, stroke := range strokes {
-		if len(merged) == 0 {
-			merged = append(merged, cloneStroke(stroke))
-			continue
-		}
-		last := &merged[len(merged)-1]
-		if canMerge(*last, stroke, tolerance) {
-			last.Points = append(last.Points, stroke.Points[1:]...)
-			continue
-		}
-		merged = append(merged, cloneStroke(stroke))
+	return bestIndex
+}
+
+func rotateClosedStroke(stroke drawing.Stroke, startIndex int) drawing.Stroke {
+	vertexCount := closedVertexCount(stroke)
+	if !stroke.Closed || startIndex <= 0 || vertexCount <= 1 {
+		return stroke
+	}
+	points := make([]drawing.Point, 0, len(stroke.Points))
+	points = append(points, stroke.Points[startIndex:vertexCount]...)
+	points = append(points, stroke.Points[:startIndex]...)
+	if hasExplicitClosure(stroke) {
+		points = append(points, points[0])
+	}
+	return drawing.Stroke{Points: points, Closed: true}
+}
+
+func closedVertexCount(stroke drawing.Stroke) int {
+	vertexCount := len(stroke.Points)
+	if hasExplicitClosure(stroke) {
+		vertexCount--
+	}
+	return vertexCount
+}
+
+func hasExplicitClosure(stroke drawing.Stroke) bool {
+	return stroke.Closed &&
+		len(stroke.Points) > 1 &&
+		samePoint(stroke.Points[0], stroke.Points[len(stroke.Points)-1])
+}
+
+func mergeContiguousStrokes(strokes []drawing.Stroke, tolerance float64) []drawing.Stroke {
+	remaining := remainingStrokes(strokes, tolerance)
+	merged := make([]drawing.Stroke, len(remaining))
+	for i, entry := range remaining {
+		merged[i] = cloneStroke(entry.stroke)
 	}
 	return merged
 }
