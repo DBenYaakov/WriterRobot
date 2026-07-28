@@ -105,7 +105,7 @@ Useful sizing options:
   --work-height 100
 ```
 
-SVG coordinates are transformed into WriterRobot program coordinates with X increasing right and Y increasing downward on paper as negative program Y. By default, the imported SVG's top-left source corner is placed at the calibrated paper origin. The sender preflights the imported bounds before homing or moving the machine and rejects unsupported SVG features, malformed coordinates, empty geometry, and drawings outside the configured work area.
+SVG coordinates are transformed into WriterRobot program coordinates with X increasing right and Y increasing downward on paper as negative program Y. By default, imported SVG geometry is uniformly scaled to fit within the configured `--work-width` and `--work-height`, preserving aspect ratio, then left/top aligned at the calibrated paper origin. The sender preflights the final fitted bounds before homing or moving the machine and rejects unsupported SVG features, malformed coordinates, empty geometry, and drawings outside the configured work area.
 
 ## SVG fixture suite
 

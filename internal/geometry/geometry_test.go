@@ -1,12 +1,14 @@
 package geometry_test
 
 import (
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 	"github.com/DBenYaakov/WriterRobot/internal/geometry"
+	"github.com/DBenYaakov/WriterRobot/internal/plot"
 	svgimport "github.com/DBenYaakov/WriterRobot/internal/svg"
 )
 
@@ -221,6 +223,75 @@ func TestProcessHonorsExplicitZeroTransform(t *testing.T) {
 	}
 }
 
+func TestProcessFitToWorkAreaFitsInkscapeSignature(t *testing.T) {
+	doc, err := svgimport.ParseFile(fixturePath("17-inkscape-signature.svg"))
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	opts := geometry.DefaultOptions()
+	opts.FitToWorkArea = true
+	opts.WorkWidth = 100
+	opts.WorkHeight = 100
+
+	result, err := geometry.ProcessWithReport(geometrySource(doc), opts)
+	if err != nil {
+		t.Fatalf("ProcessWithReport: %v", err)
+	}
+	if result.SourceBounds.Width() <= 100 || result.SourceBounds.Height() <= 100 {
+		t.Fatalf("source bounds = %+v, want larger than requested work area", result.SourceBounds)
+	}
+	assertBoundsInside(t, result.FinalBounds, geometry.WorkBounds(100, 100))
+	if result.FinalBounds.Width() > 100.001 {
+		t.Fatalf("final width = %.3f, want <= 100", result.FinalBounds.Width())
+	}
+	if result.FinalBounds.Height() > 100.001 {
+		t.Fatalf("final height = %.3f, want <= 100", result.FinalBounds.Height())
+	}
+	assertAspectRatioPreserved(t, result.SourceBounds, result.FinalBounds)
+	if len(result.Drawing.Strokes) != 29 {
+		t.Fatalf("strokes = %d, want 29", len(result.Drawing.Strokes))
+	}
+	for i, stroke := range result.Drawing.Strokes {
+		if len(stroke.Points) < 2 {
+			t.Fatalf("stroke %d point count = %d, want non-empty drawable stroke", i+1, len(stroke.Points))
+		}
+	}
+	if err := geometry.Preflight(result.Drawing, geometry.WorkBounds(100, 100)); err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	ops, err := plot.Plan(result.Drawing, plot.DefaultOptions(0.5, 1.7))
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	assertSafePenSequencing(t, ops, 29)
+}
+
+func TestProcessFitToWorkAreaPreflightsAfterFitting(t *testing.T) {
+	source := geometry.Source{Drawing: drawing.VectorDrawing{Strokes: []drawing.VectorStroke{{
+		Start: drawing.Point{X: 0, Y: 0},
+		Segments: []drawing.Segment{{
+			Kind:  drawing.SegmentLine,
+			Start: drawing.Point{X: 0, Y: 0},
+			End:   drawing.Point{X: 1000, Y: 1000},
+		}},
+		Transform: drawing.IdentityTransform(),
+	}}}}
+	opts := geometry.DefaultOptions()
+	opts.FitToWorkArea = true
+	opts.WorkWidth = 100
+	opts.WorkHeight = 100
+
+	result, err := geometry.ProcessWithReport(source, opts)
+	if err != nil {
+		t.Fatalf("ProcessWithReport: %v", err)
+	}
+	assertBounds(t, result.SourceBounds, drawing.Bounds{MinX: 0, MinY: 0, MaxX: 1000, MaxY: 1000})
+	assertBounds(t, result.FinalBounds, drawing.Bounds{MinX: 0, MinY: -100, MaxX: 100, MaxY: 0})
+	if err := geometry.Preflight(result.Drawing, geometry.WorkBounds(100, 100)); err != nil {
+		t.Fatalf("Preflight after fitting: %v", err)
+	}
+}
+
 type fixtureCase struct {
 	file        string
 	strokes     int
@@ -315,6 +386,54 @@ func assertBounds(t *testing.T, got, want drawing.Bounds) {
 	assertAlmost(t, got.MinY, want.MinY, "MinY")
 	assertAlmost(t, got.MaxX, want.MaxX, "MaxX")
 	assertAlmost(t, got.MaxY, want.MaxY, "MaxY")
+}
+
+func assertBoundsInside(t *testing.T, got, limits drawing.Bounds) {
+	t.Helper()
+	if !limits.Contains(got) {
+		t.Fatalf("bounds = %+v, want inside %+v", got, limits)
+	}
+}
+
+func assertAspectRatioPreserved(t *testing.T, source, final drawing.Bounds) {
+	t.Helper()
+	sourceRatio := source.Width() / source.Height()
+	finalRatio := final.Width() / final.Height()
+	if math.Abs(sourceRatio-finalRatio) > 0.001 {
+		t.Fatalf("aspect ratio = %.6f, want %.6f", finalRatio, sourceRatio)
+	}
+}
+
+func assertSafePenSequencing(t *testing.T, ops []plot.Operation, wantPenDowns int) {
+	t.Helper()
+	penDown := false
+	penDowns := 0
+	for _, op := range ops {
+		switch op.Kind {
+		case plot.OperationPenDown:
+			if penDown {
+				t.Fatal("lowered pen while already down")
+			}
+			penDown = true
+			penDowns++
+		case plot.OperationPenUp:
+			penDown = false
+		case plot.OperationRapidMove:
+			if penDown {
+				t.Fatalf("rapid move while pen is down: %+v", op)
+			}
+		case plot.OperationDrawMove:
+			if !penDown {
+				t.Fatalf("draw move while pen is raised: %+v", op)
+			}
+		}
+	}
+	if penDown {
+		t.Fatal("plot ended with pen down")
+	}
+	if penDowns != wantPenDowns {
+		t.Fatalf("pen-down transitions = %d, want %d", penDowns, wantPenDowns)
+	}
 }
 
 func assertPoint(t *testing.T, got, want drawing.Point, name string) {

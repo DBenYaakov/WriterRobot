@@ -48,6 +48,18 @@ type Options struct {
 	FitWidth         float64
 	FitHeight        float64
 	Anchor           Anchor
+	FitToWorkArea    bool
+	WorkWidth        float64
+	WorkHeight       float64
+}
+
+// Result describes processed geometry and the key fitting values used to
+// produce it.
+type Result struct {
+	Drawing      drawing.Drawing
+	SourceBounds drawing.Bounds
+	Scale        float64
+	FinalBounds  drawing.Bounds
 }
 
 // DefaultOptions returns the default SVG plotting geometry behavior.
@@ -58,27 +70,53 @@ func DefaultOptions() Options {
 // Process converts parsed vector geometry into flattened WriterRobot program
 // coordinates.
 func Process(source Source, opts Options) (drawing.Drawing, error) {
-	opts = opts.withDefaults()
-	if err := validateOptions(opts); err != nil {
-		return drawing.Drawing{}, err
-	}
-	strokes, err := Flatten(source.Drawing, opts.FlattenTolerance)
+	result, err := ProcessWithReport(source, opts)
 	if err != nil {
 		return drawing.Drawing{}, err
 	}
+	return result.Drawing, nil
+}
+
+// ProcessWithReport converts parsed vector geometry into flattened
+// WriterRobot program coordinates and reports the fitting values used.
+func ProcessWithReport(source Source, opts Options) (Result, error) {
+	opts = opts.withDefaults()
+	if err := validateOptions(opts); err != nil {
+		return Result{}, err
+	}
+	strokes, err := Flatten(source.Drawing, opts.FlattenTolerance)
+	if err != nil {
+		return Result{}, err
+	}
 	if len(strokes) == 0 {
-		return drawing.Drawing{}, errors.New("drawing contains no strokes")
+		return Result{}, errors.New("drawing contains no strokes")
+	}
+
+	actualBounds, err := drawing.ComputeBounds(strokes)
+	if err != nil {
+		return Result{}, err
+	}
+	if opts.FitToWorkArea {
+		d, scale, err := fitToWorkArea(strokes, actualBounds, opts)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Drawing: d, SourceBounds: actualBounds, Scale: scale, FinalBounds: d.Bounds}, nil
 	}
 
 	sourceBounds, err := source.bounds(strokes)
 	if err != nil {
-		return drawing.Drawing{}, err
+		return Result{}, err
 	}
 	scale, err := source.scaleFor(sourceBounds, opts)
 	if err != nil {
-		return drawing.Drawing{}, err
+		return Result{}, err
 	}
-	return normalizeToProgram(strokes, sourceBounds, scale, opts.Anchor)
+	d, err := normalizeToProgram(strokes, sourceBounds, scale, opts.Anchor)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Drawing: d, SourceBounds: actualBounds, Scale: scale, FinalBounds: d.Bounds}, nil
 }
 
 // Flatten converts vector strokes into polyline strokes while applying each
@@ -281,6 +319,60 @@ func normalizeToProgram(strokes []drawing.Stroke, source Rect, scale float64, an
 	return drawing.New(transformed)
 }
 
+func fitToWorkArea(strokes []drawing.Stroke, source drawing.Bounds, opts Options) (drawing.Drawing, float64, error) {
+	sourceWidth := source.Width()
+	sourceHeight := source.Height()
+	if sourceWidth <= 0 || sourceHeight <= 0 {
+		return drawing.Drawing{}, 0, errors.New("SVG source bounds must have non-zero width and height")
+	}
+	if !isFinite(sourceWidth) || !isFinite(sourceHeight) {
+		return drawing.Drawing{}, 0, errors.New("SVG source bounds must be finite")
+	}
+
+	targetWidth := opts.WorkWidth
+	targetHeight := opts.WorkHeight
+	if opts.FitWidth > 0 {
+		targetWidth = opts.FitWidth
+	}
+	if opts.FitHeight > 0 {
+		targetHeight = opts.FitHeight
+	}
+	if targetWidth <= 0 || targetHeight <= 0 || !isFinite(targetWidth) || !isFinite(targetHeight) {
+		return drawing.Drawing{}, 0, errors.New("SVG fit target must be finite and greater than zero")
+	}
+
+	scale := math.Min(targetWidth/sourceWidth, targetHeight/sourceHeight)
+	if scale <= 0 || !isFinite(scale) {
+		return drawing.Drawing{}, 0, errors.New("SVG scale must be finite and greater than zero")
+	}
+
+	scaledWidth := sourceWidth * scale
+	scaledHeight := sourceHeight * scale
+	offsetX := 0.0
+	offsetY := 0.0
+	if opts.Anchor == AnchorCenter {
+		offsetX = (opts.WorkWidth - scaledWidth) / 2
+		offsetY = -(opts.WorkHeight - scaledHeight) / 2
+	}
+
+	transformed := make([]drawing.Stroke, 0, len(strokes))
+	for _, stroke := range strokes {
+		points := make([]drawing.Point, 0, len(stroke.Points))
+		for _, point := range stroke.Points {
+			points = append(points, drawing.Point{
+				X: offsetX + (point.X-source.MinX)*scale,
+				Y: offsetY - (point.Y-source.MinY)*scale,
+			})
+		}
+		transformed = append(transformed, drawing.Stroke{Points: points, Closed: stroke.Closed})
+	}
+	d, err := drawing.New(transformed)
+	if err != nil {
+		return drawing.Drawing{}, 0, err
+	}
+	return d, scale, nil
+}
+
 func (opts Options) withDefaults() Options {
 	if opts.FlattenTolerance == 0 {
 		opts.FlattenTolerance = DefaultOptions().FlattenTolerance
@@ -298,12 +390,19 @@ func validateOptions(opts Options) error {
 	if opts.FitWidth < 0 || opts.FitHeight < 0 {
 		return errors.New("SVG fit dimensions must not be negative")
 	}
+	if opts.FitToWorkArea && (opts.WorkWidth <= 0 || opts.WorkHeight <= 0 || !isFinite(opts.WorkWidth) || !isFinite(opts.WorkHeight)) {
+		return errors.New("work width and height must be finite and greater than zero")
+	}
 	switch opts.Anchor {
 	case AnchorTopLeft, AnchorCenter:
 		return nil
 	default:
 		return fmt.Errorf("unsupported SVG anchor %q", opts.Anchor)
 	}
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func samePoint(a, b drawing.Point) bool {

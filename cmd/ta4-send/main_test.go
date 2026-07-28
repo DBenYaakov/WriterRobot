@@ -229,14 +229,14 @@ func TestLoadSVGProgramGeneratesSafePlotterMotion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSVGProgram: %v", err)
 	}
-	if bounds.MinX != 10 || bounds.MaxX != 30 || bounds.MinY != -40 || bounds.MaxY != -20 {
-		t.Fatalf("bounds = %+v, want X10..30 Y-40..-20", bounds)
+	if bounds.MinX != 0 || bounds.MaxX != 100 || bounds.MinY != -100 || bounds.MaxY != 0 {
+		t.Fatalf("bounds = %+v, want X0..100 Y-100..0", bounds)
 	}
 	want := []string{
 		"G1 Z0.500 F300",
-		"G0 X10.000 Y-20.000",
+		"G0 X0.000 Y0.000",
 		"G1 Z1.700 F200",
-		"G1 X30.000 Y-40.000 F600",
+		"G1 X100.000 Y-100.000 F600",
 		"G1 Z0.500 F300",
 		"G0 X0.000 Y0.000",
 		"G1 Z0.500 F300",
@@ -256,6 +256,7 @@ func TestLoadSVGProgramRejectsOutOfBoundsBeforeStreaming(t *testing.T) {
 
 	lines, _, err := loadSVGProgram(path, cfg, svgProgramOptions{
 		tolerance:  0.1,
+		fitWidth:   60,
 		workWidth:  50,
 		workHeight: 100,
 		drawFeed:   600,
@@ -268,6 +269,39 @@ func TestLoadSVGProgramRejectsOutOfBoundsBeforeStreaming(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exceed work bounds") {
 		t.Fatalf("error = %v, want bounds context", err)
+	}
+}
+
+func TestPrepareSVGProgramFitsBeforePreflight(t *testing.T) {
+	path := svgFixturePath("17-inkscape-signature.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	program, err := prepareSVGProgram(path, cfg, svgProgramOptions{
+		tolerance:  0.1,
+		workWidth:  100,
+		workHeight: 100,
+		drawFeed:   600,
+	})
+	if err != nil {
+		t.Fatalf("prepareSVGProgram: %v", err)
+	}
+	if program.sourceBounds.Width() <= 100 {
+		t.Fatalf("source width = %.3f, want larger than work width", program.sourceBounds.Width())
+	}
+	if program.bounds.MinX < -0.001 || program.bounds.MaxX > 100.001 || program.bounds.MinY < -100.001 || program.bounds.MaxY > 0.001 {
+		t.Fatalf("final bounds = %+v, want inside 100x100 work area", program.bounds)
+	}
+	if program.bounds.Width() < 99 {
+		t.Fatalf("final width = %.3f, want close to full 100 mm width", program.bounds.Width())
+	}
+	if program.bounds.Height() >= 100 {
+		t.Fatalf("final height = %.3f, want less than full 100 mm height", program.bounds.Height())
+	}
+	if program.strokes != 29 {
+		t.Fatalf("strokes = %d, want 29", program.strokes)
+	}
+	if len(program.lines) == 0 {
+		t.Fatal("no G-code lines generated")
 	}
 }
 

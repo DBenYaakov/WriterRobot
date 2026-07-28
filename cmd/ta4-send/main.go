@@ -46,8 +46,8 @@ func run() int {
 		positionStep    = flag.Float64("position-step", 1.0, "X/Y movement in millimeters for each position-calibration arrow press")
 		svgPath         = flag.String("svg", "", "local SVG file to import and plot")
 		svgTolerance    = flag.Float64("svg-tolerance", 0.10, "SVG curve flattening tolerance in SVG units")
-		svgFitWidth     = flag.Float64("svg-fit-width", 0, "fit imported SVG to this width in millimeters; 0 preserves source size")
-		svgFitHeight    = flag.Float64("svg-fit-height", 0, "fit imported SVG to this height in millimeters; 0 preserves source size")
+		svgFitWidth     = flag.Float64("svg-fit-width", 0, "fit imported SVG to this width in millimeters; 0 uses work width")
+		svgFitHeight    = flag.Float64("svg-fit-height", 0, "fit imported SVG to this height in millimeters; 0 uses work height")
 		svgAnchor       = flag.String("svg-anchor", "top-left", "SVG placement anchor: top-left or center")
 		workWidth       = flag.Float64("work-width", 100, "maximum drawable width in millimeters")
 		workHeight      = flag.Float64("work-height", 100, "maximum drawable height in millimeters")
@@ -86,8 +86,7 @@ func run() int {
 	var inputDescription string
 	if !*calibrateMode {
 		if svgMode {
-			var bounds drawing.Bounds
-			lines, bounds, err = loadSVGProgram(*svgPath, cfg, svgProgramOptions{
+			program, err := prepareSVGProgram(*svgPath, cfg, svgProgramOptions{
 				tolerance:  *svgTolerance,
 				fitWidth:   *svgFitWidth,
 				fitHeight:  *svgFitHeight,
@@ -99,6 +98,9 @@ func run() int {
 			if err != nil {
 				return fail(log, "prepare SVG", err)
 			}
+			lines = program.lines
+			logSVGPreparation(log, program)
+			bounds := program.bounds
 			inputDescription = fmt.Sprintf("SVG %s (bounds X%.3f..%.3f Y%.3f..%.3f)", *svgPath, bounds.MinX, bounds.MaxX, bounds.MinY, bounds.MaxY)
 		} else {
 			lines, err = loadGCodeProgram(flag.Arg(0), cfg)
@@ -187,6 +189,14 @@ type svgProgramOptions struct {
 	drawFeed   float64
 }
 
+type svgProgram struct {
+	lines        []gcode.Line
+	bounds       drawing.Bounds
+	sourceBounds drawing.Bounds
+	scale        float64
+	strokes      int
+}
+
 func loadGCodeProgram(path string, cfg config.Config) ([]gcode.Line, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -211,45 +221,70 @@ func loadGCodeProgram(path string, cfg config.Config) ([]gcode.Line, error) {
 }
 
 func loadSVGProgram(path string, cfg config.Config, opts svgProgramOptions) ([]gcode.Line, drawing.Bounds, error) {
+	program, err := prepareSVGProgram(path, cfg, opts)
+	if err != nil {
+		return nil, drawing.Bounds{}, err
+	}
+	return program.lines, program.bounds, nil
+}
+
+func prepareSVGProgram(path string, cfg config.Config, opts svgProgramOptions) (svgProgram, error) {
 	if opts.tolerance <= 0 {
-		return nil, drawing.Bounds{}, errors.New("SVG tolerance must be greater than zero")
+		return svgProgram{}, errors.New("SVG tolerance must be greater than zero")
 	}
 	if opts.workWidth <= 0 || opts.workHeight <= 0 {
-		return nil, drawing.Bounds{}, errors.New("work width and height must be greater than zero")
+		return svgProgram{}, errors.New("work width and height must be greater than zero")
 	}
 	if opts.drawFeed <= 0 {
-		return nil, drawing.Bounds{}, errors.New("draw feed must be greater than zero")
+		return svgProgram{}, errors.New("draw feed must be greater than zero")
 	}
 
 	doc, err := svgimport.ParseFile(path)
 	if err != nil {
-		return nil, drawing.Bounds{}, err
+		return svgProgram{}, err
 	}
 	geometryOpts := geometry.DefaultOptions()
 	geometryOpts.FlattenTolerance = opts.tolerance
 	geometryOpts.FitWidth = opts.fitWidth
 	geometryOpts.FitHeight = opts.fitHeight
 	geometryOpts.Anchor = geometry.Anchor(opts.anchor)
-	d, err := geometry.Process(svgGeometrySource(doc), geometryOpts)
+	geometryOpts.FitToWorkArea = true
+	geometryOpts.WorkWidth = opts.workWidth
+	geometryOpts.WorkHeight = opts.workHeight
+	result, err := geometry.ProcessWithReport(svgGeometrySource(doc), geometryOpts)
 	if err != nil {
-		return nil, drawing.Bounds{}, err
+		return svgProgram{}, err
 	}
+	d := result.Drawing
 
 	workBounds := geometry.WorkBounds(opts.workWidth, opts.workHeight)
 	if err := geometry.Preflight(d, workBounds); err != nil {
-		return nil, drawing.Bounds{}, err
+		return svgProgram{}, err
 	}
 	plotOpts := plot.DefaultOptions(cfg.PenUp, cfg.PenDown)
 	plotOpts.DrawFeed = opts.drawFeed
 	ops, err := plot.Plan(d, plotOpts)
 	if err != nil {
-		return nil, drawing.Bounds{}, err
+		return svgProgram{}, err
 	}
 	lines, err := machine.ProgramFromPlan(ops)
 	if err != nil {
-		return nil, drawing.Bounds{}, err
+		return svgProgram{}, err
 	}
-	return lines, d.Bounds, nil
+	return svgProgram{
+		lines:        lines,
+		bounds:       result.FinalBounds,
+		sourceBounds: result.SourceBounds,
+		scale:        result.Scale,
+		strokes:      len(d.Strokes),
+	}, nil
+}
+
+func logSVGPreparation(log console.Logger, program svgProgram) {
+	log.Info(fmt.Sprintf("SVG source bounds: X%.3f..%.3f Y%.3f..%.3f", program.sourceBounds.MinX, program.sourceBounds.MaxX, program.sourceBounds.MinY, program.sourceBounds.MaxY))
+	log.Info(fmt.Sprintf("SVG scale: %.6f", program.scale))
+	log.Info(fmt.Sprintf("SVG final bounds: X%.3f..%.3f Y%.3f..%.3f", program.bounds.MinX, program.bounds.MaxX, program.bounds.MinY, program.bounds.MaxY))
+	log.Info(fmt.Sprintf("SVG strokes: %d", program.strokes))
 }
 
 func svgGeometrySource(doc svgimport.Document) geometry.Source {

@@ -19,6 +19,14 @@ import (
 	"github.com/DBenYaakov/WriterRobot/internal/drawing"
 )
 
+const (
+	svgNamespace      = "http://www.w3.org/2000/svg"
+	sodipodiNamespace = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+	rdfNamespace      = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+	ccNamespace       = "http://creativecommons.org/ns#"
+	dcNamespace       = "http://purl.org/dc/elements/1.1/"
+)
+
 // Document is parsed SVG vector geometry plus source-viewport metadata.
 type Document struct {
 	Drawing drawing.VectorDrawing
@@ -51,8 +59,8 @@ func Parse(r io.Reader) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
-	if root.name != "svg" {
-		return Document{}, fmt.Errorf("root element is <%s>, want <svg>", root.name)
+	if root.local != "svg" || !root.inSVGNamespace() {
+		return Document{}, fmt.Errorf("root element is <%s>, want <svg>", root.displayName())
 	}
 
 	viewBox, err := parseViewBox(root.attrs["viewBox"])
@@ -84,9 +92,10 @@ func Parse(r io.Reader) (Document, error) {
 }
 
 type element struct {
-	name     string
-	attrs    map[string]string
-	children []element
+	namespace string
+	local     string
+	attrs     map[string]string
+	children  []element
 }
 
 type importer struct {
@@ -113,8 +122,9 @@ func decode(r io.Reader) (element, error) {
 
 func readElement(decoder *xml.Decoder, start xml.StartElement) (element, error) {
 	elem := element{
-		name:  start.Name.Local,
-		attrs: make(map[string]string, len(start.Attr)),
+		namespace: start.Name.Space,
+		local:     start.Name.Local,
+		attrs:     make(map[string]string, len(start.Attr)),
 	}
 	for _, attr := range start.Attr {
 		elem.attrs[attr.Name.Local] = attr.Value
@@ -122,7 +132,7 @@ func readElement(decoder *xml.Decoder, start xml.StartElement) (element, error) 
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return element{}, fmt.Errorf("parse <%s>: %w", elem.name, err)
+			return element{}, fmt.Errorf("parse <%s>: %w", elem.displayName(), err)
 		}
 		switch typed := token.(type) {
 		case xml.StartElement:
@@ -132,7 +142,7 @@ func readElement(decoder *xml.Decoder, start xml.StartElement) (element, error) 
 			}
 			elem.children = append(elem.children, child)
 		case xml.EndElement:
-			if typed.Name.Local == elem.name {
+			if typed.Name.Space == elem.namespace && typed.Name.Local == elem.local {
 				return elem, nil
 			}
 		}
@@ -140,19 +150,22 @@ func readElement(decoder *xml.Decoder, start xml.StartElement) (element, error) 
 }
 
 func (i *importer) process(elem element, parent drawing.Transform) error {
-	if ignoredElement(elem.name) {
+	if ignoredMetadataElement(elem) {
 		return nil
+	}
+	if !elem.inSVGNamespace() {
+		return fmt.Errorf("unsupported SVG element <%s>", elem.displayName())
 	}
 	if err := rejectUnsafeAttributes(elem); err != nil {
 		return err
 	}
 	local, err := parseTransform(elem.attrs["transform"])
 	if err != nil {
-		return fmt.Errorf("<%s> transform: %w", elem.name, err)
+		return fmt.Errorf("<%s> transform: %w", elem.displayName(), err)
 	}
 	transform := parent.Then(local)
 
-	switch elem.name {
+	switch elem.local {
 	case "svg", "g":
 		for _, child := range elem.children {
 			if err := i.process(child, transform); err != nil {
@@ -202,7 +215,7 @@ func (i *importer) process(elem element, parent drawing.Transform) error {
 		}
 		i.strokes = append(i.strokes, stroke)
 	default:
-		return fmt.Errorf("unsupported SVG element <%s>", elem.name)
+		return fmt.Errorf("unsupported SVG element <%s>", elem.displayName())
 	}
 	return nil
 }
@@ -230,10 +243,10 @@ func parseLine(elem element, transform drawing.Transform) (drawing.VectorStroke,
 func parsePolyline(elem element, closed bool, transform drawing.Transform) (drawing.VectorStroke, error) {
 	points, err := parsePoints(elem.attrs["points"])
 	if err != nil {
-		return drawing.VectorStroke{}, fmt.Errorf("<%s>: %w", elem.name, err)
+		return drawing.VectorStroke{}, fmt.Errorf("<%s>: %w", elem.displayName(), err)
 	}
 	if len(points) < 2 {
-		return drawing.VectorStroke{}, fmt.Errorf("<%s> contains fewer than two points", elem.name)
+		return drawing.VectorStroke{}, fmt.Errorf("<%s> contains fewer than two points", elem.displayName())
 	}
 	return strokeFromPoints(points, closed, transform), nil
 }
@@ -400,11 +413,11 @@ func optionalRootLength(elem element, name string) (*float64, error) {
 func requiredLength(elem element, name string) (float64, error) {
 	value, ok := elem.attrs[name]
 	if !ok || strings.TrimSpace(value) == "" {
-		return 0, fmt.Errorf("<%s> missing required %s attribute", elem.name, name)
+		return 0, fmt.Errorf("<%s> missing required %s attribute", elem.displayName(), name)
 	}
 	parsed, _, err := optionalLength(value)
 	if err != nil {
-		return 0, fmt.Errorf("<%s> %s: %w", elem.name, name, err)
+		return 0, fmt.Errorf("<%s> %s: %w", elem.displayName(), name, err)
 	}
 	return parsed, nil
 }
@@ -412,7 +425,7 @@ func requiredLength(elem element, name string) (float64, error) {
 func optionalLengthAttr(elem element, name string) (float64, error) {
 	parsed, _, err := optionalLength(elem.attrs[name])
 	if err != nil {
-		return 0, fmt.Errorf("<%s> %s: %w", elem.name, name, err)
+		return 0, fmt.Errorf("<%s> %s: %w", elem.displayName(), name, err)
 	}
 	return parsed, nil
 }
@@ -463,9 +476,27 @@ func parseNumberList(value string) ([]float64, error) {
 	return tokens, nil
 }
 
-func ignoredElement(name string) bool {
-	switch name {
-	case "defs", "title", "desc", "metadata", "style":
+func (elem element) inSVGNamespace() bool {
+	return elem.namespace == "" || elem.namespace == svgNamespace
+}
+
+func (elem element) displayName() string {
+	return elem.local
+}
+
+func ignoredMetadataElement(elem element) bool {
+	if elem.inSVGNamespace() {
+		switch elem.local {
+		case "defs", "title", "desc", "metadata", "style":
+			return true
+		default:
+			return false
+		}
+	}
+	switch elem.namespace {
+	case sodipodiNamespace:
+		return elem.local == "namedview"
+	case rdfNamespace, ccNamespace, dcNamespace:
 		return true
 	default:
 		return false
@@ -473,9 +504,9 @@ func ignoredElement(name string) bool {
 }
 
 func rejectUnsafeAttributes(elem element) error {
-	for _, name := range []string{"clip-path", "mask"} {
+	for _, name := range []string{"clip-path", "mask", "filter"} {
 		if value := strings.TrimSpace(elem.attrs[name]); value != "" {
-			return fmt.Errorf("<%s> uses unsupported %s attribute", elem.name, name)
+			return fmt.Errorf("<%s> uses unsupported %s attribute", elem.displayName(), name)
 		}
 	}
 	return nil
