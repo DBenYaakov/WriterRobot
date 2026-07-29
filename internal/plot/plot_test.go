@@ -417,6 +417,260 @@ func TestPlanPreservesOriginalDirectionWhenEndpointDistancesAreEqualWithinTolera
 	assertPoints(t, drawMovePoints(ops), []drawing.Point{{X: 1 - delta, Y: 0}})
 }
 
+func TestCurvatureTercilesMapBottomMiddleTopToSlowNormalFast(t *testing.T) {
+	segments := []drawSegment{
+		{curvature: 0.1, length: 10},
+		{curvature: 0.5, length: 10},
+		{curvature: 1.0, length: 10},
+	}
+
+	levels := curvatureTercileLevels(segments)
+
+	want := []drawingFeedLevel{feedSlow, feedNormal, feedFast}
+	if !reflect.DeepEqual(levels, want) {
+		t.Fatalf("levels = %+v, want %+v", levels, want)
+	}
+}
+
+func TestPlanUsesFixedDrawFeedByDefault(t *testing.T) {
+	opts := DefaultOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 20, Y: 0}, {X: 30, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	want := []float64{normalDrawingFeed(opts.DrawFeed), normalDrawingFeed(opts.DrawFeed), normalDrawingFeed(opts.DrawFeed)}
+	assertFeeds(t, effectiveDrawFeeds(ops), want)
+	if got, want := nonzeroDrawFeedCount(ops), 1; got != want {
+		t.Fatalf("draw feed changes = %d, want %d", got, want)
+	}
+}
+
+func TestPlanModulatesStraightRunByDistanceWeightedCurvatureTerciles(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 20, Y: 0}, {X: 30, Y: 0}, {X: 40, Y: 0}, {X: 50, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	want := []float64{
+		slowDrawingFeed(opts.DrawFeed),
+		slowDrawingFeed(opts.DrawFeed),
+		normalDrawingFeed(opts.DrawFeed),
+		fastDrawingFeed(opts.DrawFeed),
+		fastDrawingFeed(opts.DrawFeed),
+	}
+	assertFeeds(t, effectiveDrawFeeds(ops), want)
+}
+
+func TestPlanUsesFastFeedForHighCurvatureBand(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 20, Y: 0}, {X: 20, Y: -10}, {X: 20, Y: -20}, {X: 30, Y: -20}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if !containsFeed(effectiveDrawFeeds(ops), fastDrawingFeed(opts.DrawFeed)) {
+		t.Fatalf("feeds = %+v, want high-curvature band to include fast feed %.3f", effectiveDrawFeeds(ops), fastDrawingFeed(opts.DrawFeed))
+	}
+}
+
+func TestPlanUsesNormalFeedForMiddleCurvatureBand(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{
+			{X: 0, Y: 0},
+			{X: 10, Y: 0},
+			{X: 18.660, Y: 5},
+			{X: 27.320, Y: 10},
+			{X: 37.320, Y: 10},
+		}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if !containsFeed(effectiveDrawFeeds(ops), normalDrawingFeed(opts.DrawFeed)) {
+		t.Fatalf("feeds = %+v, want middle-curvature band to include normal feed %.3f", effectiveDrawFeeds(ops), normalDrawingFeed(opts.DrawFeed))
+	}
+}
+
+func TestPlanDoesNotTreatClosedPathEntryAsEndpointSlowdown(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{regularClosedPolygon(10, 36)})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	feeds := effectiveDrawFeeds(ops)
+	if !containsFeed(feeds, slowDrawingFeed(opts.DrawFeed)) ||
+		!containsFeed(feeds, normalDrawingFeed(opts.DrawFeed)) ||
+		!containsFeed(feeds, fastDrawingFeed(opts.DrawFeed)) {
+		t.Fatalf("closed path feeds = %+v, want histogram-based spread across all feed bands", feeds)
+	}
+}
+
+func TestPlanUsesHistogramForShortOpenStroke(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 0, Y: 0}, {X: 0.25, Y: 0}, {X: 0.50, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	want := []float64{slowDrawingFeed(opts.DrawFeed), normalDrawingFeed(opts.DrawFeed)}
+	assertFeeds(t, effectiveDrawFeeds(ops), want)
+}
+
+func TestPlanAvoidsFeedChatterAcrossTinyFlattenedSegments(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	points := make([]drawing.Point, 0, 12)
+	for i := 0; i < 12; i++ {
+		points = append(points, drawing.Point{X: float64(i) * 0.1, Y: 0})
+	}
+	d := mustDrawing(t, []drawing.Stroke{{Points: points}})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if got, want := nonzeroDrawFeedCount(ops), 3; got != want {
+		t.Fatalf("draw feed changes = %d, want %d", got, want)
+	}
+	if hasDirectSlowFastFeedTransition(effectiveDrawFeeds(ops), opts.DrawFeed) {
+		t.Fatalf("feeds = %+v, want no direct slow/fast chatter", effectiveDrawFeeds(ops))
+	}
+}
+
+func TestPlanDoesNotTransitionDirectlyFromSlowToFast(t *testing.T) {
+	opts := signatureOptions(0.5, 1.7)
+	opts.ReturnToOrigin = false
+	d := mustDrawing(t, []drawing.Stroke{
+		{Points: []drawing.Point{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 20, Y: 0}, {X: 30, Y: 0}, {X: 40, Y: 0}}},
+	})
+
+	ops, err := Plan(d, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	feeds := effectiveDrawFeeds(ops)
+	if got, want := feeds[0], slowDrawingFeed(opts.DrawFeed); !sameFeed(got, want) {
+		t.Fatalf("first feed = %.3f, want slow %.3f", got, want)
+	}
+	if got, want := feeds[1], normalDrawingFeed(opts.DrawFeed); !sameFeed(got, want) {
+		t.Fatalf("second feed = %.3f, want normal %.3f before fast", got, want)
+	}
+}
+
+func TestAnalyzeDrawFeedsReportsEstimatedTimeByMode(t *testing.T) {
+	ops := []Operation{
+		{Kind: OperationPenUp, Z: 0.5, Feed: 300},
+		{Kind: OperationRapidMove, Point: drawing.Point{}},
+		{Kind: OperationPenDown, Z: 1.7, Feed: 200},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 10, Y: 0}, Feed: slowDrawingFeed(defaultDrawFeed)},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 20, Y: 0}},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 30, Y: 0}, Feed: normalDrawingFeed(defaultDrawFeed)},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 40, Y: 0}, Feed: fastDrawingFeed(defaultDrawFeed)},
+	}
+
+	stats, err := AnalyzeDrawFeeds(ops, defaultDrawFeed)
+	if err != nil {
+		t.Fatalf("AnalyzeDrawFeeds: %v", err)
+	}
+
+	if got, want := stats.Slow.Moves, 2; got != want {
+		t.Fatalf("slow moves = %d, want %d", got, want)
+	}
+	if got, want := stats.Slow.Distance, 20.0; math.Abs(got-want) > DefaultContiguousTolerance {
+		t.Fatalf("slow distance = %.6f, want %.6f", got, want)
+	}
+	if got, want := stats.Slow.Seconds, 20.0/slowDrawingFeed(defaultDrawFeed)*60; math.Abs(got-want) > DefaultContiguousTolerance {
+		t.Fatalf("slow seconds = %.6f, want %.6f", got, want)
+	}
+	if got, want := stats.Normal.Moves, 1; got != want {
+		t.Fatalf("normal moves = %d, want %d", got, want)
+	}
+	if got, want := stats.Fast.Moves, 1; got != want {
+		t.Fatalf("fast moves = %d, want %d", got, want)
+	}
+	if stats.Other.Moves != 0 {
+		t.Fatalf("other moves = %d, want 0", stats.Other.Moves)
+	}
+}
+
+func TestAnalyzeDrawFeedsRejectsMissingEffectiveFeed(t *testing.T) {
+	_, err := AnalyzeDrawFeeds([]Operation{
+		{Kind: OperationRapidMove, Point: drawing.Point{}},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 10, Y: 0}},
+	}, defaultDrawFeed)
+	if err == nil {
+		t.Fatal("AnalyzeDrawFeeds succeeded without an effective draw feed")
+	}
+	if !strings.Contains(err.Error(), "no effective feed") {
+		t.Fatalf("error = %v, want missing feed context", err)
+	}
+}
+
+func TestAnalyzeCurvatureReportsHistogramByFeedBand(t *testing.T) {
+	ops := []Operation{
+		{Kind: OperationPenUp, Z: 0.5, Feed: 300},
+		{Kind: OperationRapidMove, Point: drawing.Point{}},
+		{Kind: OperationPenDown, Z: 1.7, Feed: 200},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 10, Y: 0}, Feed: slowDrawingFeed(defaultDrawFeed)},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 10, Y: -10}, Feed: normalDrawingFeed(defaultDrawFeed)},
+		{Kind: OperationDrawMove, Point: drawing.Point{X: 20, Y: -10}, Feed: fastDrawingFeed(defaultDrawFeed)},
+	}
+
+	histogram, err := AnalyzeCurvature(ops, defaultDrawFeed, DefaultContiguousTolerance)
+	if err != nil {
+		t.Fatalf("AnalyzeCurvature: %v", err)
+	}
+
+	if got, want := histogram.Slow.Moves, 1; got != want {
+		t.Fatalf("slow moves = %d, want %d", got, want)
+	}
+	if got, want := histogram.Normal.Moves, 1; got != want {
+		t.Fatalf("normal moves = %d, want %d", got, want)
+	}
+	if got, want := histogram.Fast.Moves, 1; got != want {
+		t.Fatalf("fast moves = %d, want %d", got, want)
+	}
+	if histogram.Normal.MaxDegrees < 89 || histogram.Normal.MaxDegrees > 91 {
+		t.Fatalf("normal curvature max degrees = %.3f, want about 90", histogram.Normal.MaxDegrees)
+	}
+	if got, want := histogram.TotalDistance(), 30.0; math.Abs(got-want) > DefaultContiguousTolerance {
+		t.Fatalf("total curvature distance = %.6f, want %.6f", got, want)
+	}
+}
+
 func TestPlanSelectsNearestClosedPathVertex(t *testing.T) {
 	opts := DefaultOptions(0.5, 1.7)
 	opts.ReturnToOrigin = false
@@ -816,6 +1070,12 @@ func mustDrawing(t *testing.T, strokes []drawing.Stroke) drawing.Drawing {
 	return d
 }
 
+func signatureOptions(penUpZ, penDownZ float64) Options {
+	opts := DefaultOptions(penUpZ, penDownZ)
+	opts.ModulateDrawFeed = true
+	return opts
+}
+
 func assertOperations(t *testing.T, got, want []Operation) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -876,6 +1136,52 @@ func rapidMovePoints(ops []Operation) []drawing.Point {
 	return points
 }
 
+func effectiveDrawFeeds(ops []Operation) []float64 {
+	var feeds []float64
+	currentFeed := 0.0
+	for _, op := range ops {
+		if op.Kind != OperationDrawMove {
+			continue
+		}
+		if op.Feed > 0 {
+			currentFeed = op.Feed
+		}
+		feeds = append(feeds, currentFeed)
+	}
+	return feeds
+}
+
+func nonzeroDrawFeedCount(ops []Operation) int {
+	count := 0
+	for _, op := range ops {
+		if op.Kind == OperationDrawMove && op.Feed > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func containsFeed(feeds []float64, want float64) bool {
+	for _, feed := range feeds {
+		if sameFeed(feed, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirectSlowFastFeedTransition(feeds []float64, normalFeed float64) bool {
+	slow := slowDrawingFeed(normalFeed)
+	fast := fastDrawingFeed(normalFeed)
+	for i := 1; i < len(feeds); i++ {
+		if (sameFeed(feeds[i-1], slow) && sameFeed(feeds[i], fast)) ||
+			(sameFeed(feeds[i-1], fast) && sameFeed(feeds[i], slow)) {
+			return true
+		}
+	}
+	return false
+}
+
 func firstN(points []drawing.Point, n int) []drawing.Point {
 	if len(points) < n {
 		return points
@@ -899,6 +1205,18 @@ func assertPoints(t *testing.T, got, want []drawing.Point) {
 	}
 }
 
+func assertFeeds(t *testing.T, got, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("feeds = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if !sameFeed(got[i], want[i]) {
+			t.Fatalf("feed %d = %.3f, want %.3f", i+1, got[i], want[i])
+		}
+	}
+}
+
 func samePoints(a, b []drawing.Point) bool {
 	if len(a) != len(b) {
 		return false
@@ -909,6 +1227,19 @@ func samePoints(a, b []drawing.Point) bool {
 		}
 	}
 	return true
+}
+
+func regularClosedPolygon(radius float64, vertices int) drawing.Stroke {
+	points := make([]drawing.Point, 0, vertices+1)
+	for i := 0; i < vertices; i++ {
+		angle := 2 * math.Pi * float64(i) / float64(vertices)
+		points = append(points, drawing.Point{
+			X: radius * math.Cos(angle),
+			Y: radius * math.Sin(angle),
+		})
+	}
+	points = append(points, points[0])
+	return drawing.Stroke{Points: points, Closed: true}
 }
 
 func penUpTravelDistance(ops []Operation) float64 {

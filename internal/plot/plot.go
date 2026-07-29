@@ -7,11 +7,16 @@
 // open stroke may be drawn in reverse when its endpoint is closer to the current
 // pen position. Closed strokes keep their original orientation, but rotate to
 // enter at the nearest vertex. Equal-distance ties preserve original document
-// order, original stroke direction, and the earliest closed-path vertex. The
-// planner inserts pen-up travel between disconnected strokes, lowers the pen
-// only for drawing moves, and returns an ordered list of operations. It does not
-// format G-code or know about GRBL, sessions, serial transport, SVG, or CLI
-// flags.
+// order, original stroke direction, and the earliest closed-path vertex. After
+// stroke geometry is selected, pen-down moves use the configured fixed drawing
+// feed by default. Optional curvature-aware drawing feed modulation ranks local
+// curvature across the whole plan by drawing distance: the lower third uses the
+// slow feed, the middle third uses the configured normal feed, and the upper
+// third uses the fast feed. A small smoothing pass suppresses direct slow/fast
+// chatter. The planner inserts pen-up travel between disconnected strokes,
+// lowers the pen only for drawing moves, and returns an ordered list of
+// operations. It does not format G-code or know about GRBL, sessions, serial
+// transport, SVG, or CLI flags.
 package plot
 
 import (
@@ -64,6 +69,7 @@ type Options struct {
 	DrawFeed            float64
 	ReturnToOrigin      bool
 	ContiguousTolerance float64
+	ModulateDrawFeed    bool
 }
 
 // DefaultOptions returns safe defaults for generated drawing operations.
@@ -109,12 +115,8 @@ func Plan(d drawing.Drawing, opts Options) ([]Operation, error) {
 			Operation{Kind: OperationRapidMove, Point: start},
 			Operation{Kind: OperationPenDown, Z: opts.PenDownZ, Feed: opts.PenLowerFeed},
 		)
-		for j, point := range drawablePoints(stroke) {
-			feed := 0.0
-			if j == 0 {
-				feed = opts.DrawFeed
-			}
-			ops = append(ops, Operation{Kind: OperationDrawMove, Point: point, Feed: feed})
+		for _, point := range drawablePoints(stroke) {
+			ops = append(ops, Operation{Kind: OperationDrawMove, Point: point})
 		}
 		ops = append(ops, Operation{Kind: OperationPenUp, Z: opts.PenUpZ, Feed: opts.PenRaiseFeed})
 		current = strokeEnd(stroke)
@@ -124,6 +126,11 @@ func Plan(d drawing.Drawing, opts Options) ([]Operation, error) {
 			Operation{Kind: OperationRapidMove, Point: drawing.Point{}},
 			Operation{Kind: OperationPenUp, Z: opts.PenUpZ, Feed: opts.PenRaiseFeed},
 		)
+	}
+	if opts.ModulateDrawFeed {
+		annotateCurvatureFeeds(ops, opts.DrawFeed, opts.ContiguousTolerance)
+	} else {
+		annotateFixedDrawFeeds(ops, opts.DrawFeed)
 	}
 	return ops, nil
 }

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -49,6 +50,7 @@ func run() int {
 		svgFitWidth     = flag.Float64("svg-fit-width", 0, "fit imported SVG to this width in millimeters; 0 uses work width")
 		svgFitHeight    = flag.Float64("svg-fit-height", 0, "fit imported SVG to this height in millimeters; 0 uses work height")
 		svgAnchor       = flag.String("svg-anchor", "top-left", "SVG placement anchor: top-left or center")
+		signature       = flag.Bool("signature", false, "enable signature plotting feed modulation for SVG input")
 		workWidth       = flag.Float64("work-width", 100, "maximum drawable width in millimeters")
 		workHeight      = flag.Float64("work-height", 100, "maximum drawable height in millimeters")
 		drawFeed        = flag.Float64("draw-feed", 600, "drawing feed rate in millimeters per minute")
@@ -94,6 +96,7 @@ func run() int {
 				workWidth:  *workWidth,
 				workHeight: *workHeight,
 				drawFeed:   *drawFeed,
+				signature:  *signature,
 			})
 			if err != nil {
 				return fail(log, "prepare SVG", err)
@@ -198,6 +201,7 @@ type svgProgramOptions struct {
 	workWidth  float64
 	workHeight float64
 	drawFeed   float64
+	signature  bool
 }
 
 type svgProgram struct {
@@ -206,6 +210,9 @@ type svgProgram struct {
 	sourceBounds drawing.Bounds
 	scale        float64
 	strokes      int
+	signature    bool
+	feedStats    plot.DrawFeedTimeSummary
+	curvature    plot.CurvatureHistogram
 }
 
 func loadGCodeProgram(path string, cfg config.Config) ([]gcode.Line, error) {
@@ -274,9 +281,22 @@ func prepareSVGProgram(path string, cfg config.Config, opts svgProgramOptions) (
 	}
 	plotOpts := plot.DefaultOptions(cfg.PenUp, cfg.PenDown)
 	plotOpts.DrawFeed = opts.drawFeed
+	plotOpts.ModulateDrawFeed = opts.signature
 	ops, err := plot.Plan(d, plotOpts)
 	if err != nil {
 		return svgProgram{}, err
+	}
+	var feedStats plot.DrawFeedTimeSummary
+	var curvature plot.CurvatureHistogram
+	if opts.signature {
+		feedStats, err = plot.AnalyzeDrawFeeds(ops, plotOpts.DrawFeed)
+		if err != nil {
+			return svgProgram{}, err
+		}
+		curvature, err = plot.AnalyzeCurvature(ops, plotOpts.DrawFeed, plotOpts.ContiguousTolerance)
+		if err != nil {
+			return svgProgram{}, err
+		}
 	}
 	lines, err := machine.ProgramFromPlan(ops)
 	if err != nil {
@@ -288,6 +308,9 @@ func prepareSVGProgram(path string, cfg config.Config, opts svgProgramOptions) (
 		sourceBounds: result.SourceBounds,
 		scale:        result.Scale,
 		strokes:      len(d.Strokes),
+		signature:    opts.signature,
+		feedStats:    feedStats,
+		curvature:    curvature,
 	}, nil
 }
 
@@ -296,6 +319,66 @@ func logSVGPreparation(log console.Logger, program svgProgram) {
 	log.Info(fmt.Sprintf("SVG scale: %.6f", program.scale))
 	log.Info(fmt.Sprintf("SVG final bounds: X%.3f..%.3f Y%.3f..%.3f", program.bounds.MinX, program.bounds.MaxX, program.bounds.MinY, program.bounds.MaxY))
 	log.Info(fmt.Sprintf("SVG strokes: %d", program.strokes))
+	if !program.signature {
+		return
+	}
+	if total := program.curvature.TotalDistance(); total > 0 {
+		log.Info(formatCurvatureHistogram(program.curvature))
+	}
+	if total := program.feedStats.TotalSeconds(); total > 0 {
+		log.Info(formatDrawFeedTimeSummary(program.feedStats))
+	}
+}
+
+func formatCurvatureHistogram(histogram plot.CurvatureHistogram) string {
+	total := histogram.TotalDistance()
+	parts := []string{
+		formatCurvatureBand("low/slow", histogram.Slow, total),
+		formatCurvatureBand("middle/normal", histogram.Normal, total),
+		formatCurvatureBand("high/fast", histogram.Fast, total),
+	}
+	if histogram.Other.Distance > 0 {
+		parts = append(parts, formatCurvatureBand("other", histogram.Other, total))
+	}
+	return fmt.Sprintf("SVG curvature histogram by drawing distance: %s", strings.Join(parts, ", "))
+}
+
+func formatCurvatureBand(name string, band plot.CurvatureBand, total float64) string {
+	return fmt.Sprintf(
+		"%s F%s %.1f%% (%.1f..%.1f deg)",
+		name,
+		formatFeedForLog(band.Feed),
+		timePercent(band.Distance, total),
+		band.MinDegrees,
+		band.MaxDegrees,
+	)
+}
+
+func formatDrawFeedTimeSummary(stats plot.DrawFeedTimeSummary) string {
+	total := stats.TotalSeconds()
+	parts := []string{
+		fmt.Sprintf("slow F%s %.1f%%", formatFeedForLog(stats.Slow.Feed), timePercent(stats.Slow.Seconds, total)),
+		fmt.Sprintf("normal F%s %.1f%%", formatFeedForLog(stats.Normal.Feed), timePercent(stats.Normal.Seconds, total)),
+		fmt.Sprintf("fast F%s %.1f%%", formatFeedForLog(stats.Fast.Feed), timePercent(stats.Fast.Seconds, total)),
+	}
+	if stats.Other.Seconds > 0 {
+		parts = append(parts, fmt.Sprintf("other %.1f%%", timePercent(stats.Other.Seconds, total)))
+	}
+	return fmt.Sprintf("SVG estimated pen-down time by feed: %s (total %.1fs)", strings.Join(parts, ", "), total)
+}
+
+func timePercent(part, total float64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return part / total * 100
+}
+
+func formatFeedForLog(feed float64) string {
+	if math.Abs(feed-math.Round(feed)) < 0.0005 {
+		return fmt.Sprintf("%.0f", feed)
+	}
+	return fmt.Sprintf("%.3f", feed)
 }
 
 func svgGeometrySource(doc svgimport.Document) geometry.Source {

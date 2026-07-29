@@ -133,7 +133,7 @@ The SVG plotting path is deliberately layered:
 - `internal/svg` reads XML, parses supported SVG elements and path commands, and returns neutral source-coordinate vector geometry plus document metadata such as `viewBox`, width, and height.
 - `internal/drawing` defines neutral geometry types only. It does not know about SVG, G-code, GRBL, machine control, sessions, or CLI flags.
 - `internal/geometry` applies transforms, flattens curves, handles `viewBox` and SVG sizing, scales or fits geometry, inverts Y into WriterRobot program coordinates, computes bounds, and performs work-area preflight.
-- `internal/plot` turns processed drawings into ordered pen-up, rapid-move, pen-down, and drawing-move operations. It first merges already-contiguous open strokes, then uses constrained nearest-neighbor planning: only the first three remaining source-order strokes are considered, and any stroke bypassed twice becomes mandatory. Open strokes may be drawn in reverse when that endpoint is closer to the current pen position. Closed strokes are never reversed, but they may rotate to enter at the nearest vertex while preserving the original orientation. Equal-distance ties keep the original document order, original direction, and earliest closed-path vertex.
+- `internal/plot` turns processed drawings into ordered pen-up, rapid-move, pen-down, and drawing-move operations. It first merges already-contiguous open strokes, then uses constrained nearest-neighbor planning: only the first three remaining source-order strokes are considered, and any stroke bypassed twice becomes mandatory. Open strokes may be drawn in reverse when that endpoint is closer to the current pen position. Closed strokes are never reversed, but they may rotate to enter at the nearest vertex while preserving the original orientation. Equal-distance ties keep the original document order, original direction, and earliest closed-path vertex. Pen-down drawing moves use the configured drawing feed by default. When SVG input is plotted with `--signature`, the planner enables curvature-aware feed-rate modulation based on a distance-weighted curvature histogram for the whole plan: the lower third uses a slow feed, the middle third uses the configured normal feed, and the upper third uses a fast feed. The current experimental levels are 40%, 100%, and 135% of the configured drawing feed. A small smoothing pass suppresses direct slow/fast chatter. No dwell commands are added, and geometry, route planning, and pen-up travel speeds are unchanged.
 - `internal/machine`, `internal/session`, and `internal/grbl` own machine command formatting, session lifecycle, and controller transport.
 
 ## Safety
@@ -222,6 +222,6 @@ Customize placement or feed rates as needed:
   --row-spacing 40
 ```
 
-## Planned handwriting stroke profile
+## Signature stroke profile
 
-The SVG-to-G-code stage should support a `handwriting` stroke profile that varies feed rate with local curvature: faster on long straight sweeps and slower through tight curves and direction changes. With a gel pen, this also varies ink prominence in a way that more closely resembles a human signature.
+For signature-style SVGs, add `--signature` to vary drawing feed with local curvature. The default SVG mode uses the configured fixed drawing feed. Signature mode logs the curvature histogram and estimated pen-down time in each feed band so speed variation can be tuned from actual plotted geometry.

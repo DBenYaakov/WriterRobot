@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/DBenYaakov/WriterRobot/internal/config"
 	"github.com/DBenYaakov/WriterRobot/internal/console"
+	"github.com/DBenYaakov/WriterRobot/internal/gcode"
 	"github.com/DBenYaakov/WriterRobot/internal/grbl"
 	"github.com/DBenYaakov/WriterRobot/internal/machine"
+	"github.com/DBenYaakov/WriterRobot/internal/plot"
 	"github.com/DBenYaakov/WriterRobot/internal/session"
 )
 
@@ -190,10 +193,10 @@ func TestCalibrationDiagnosticsDrawSelectedPattern(t *testing.T) {
 	if !port.sawCommand("G1 Z0.500 F300") {
 		t.Fatal("diagnostic pattern did not begin with pen raised")
 	}
-	if !port.sawCommand("G1 X60.000 Y0.000 F600") {
+	if !port.sawCommandPrefix("G1 X60.000 Y0.000") {
 		t.Fatal("crosshair horizontal axis was not drawn")
 	}
-	if !port.sawCommand("G1 X0.000 Y-60.000 F600") {
+	if !port.sawCommandPrefix("G1 X0.000 Y-60.000") {
 		t.Fatal("crosshair vertical axis was not drawn")
 	}
 	if !port.sawCommand("G0 X0.000 Y0.000") {
@@ -302,6 +305,90 @@ func TestPrepareSVGProgramFitsBeforePreflight(t *testing.T) {
 	}
 	if len(program.lines) == 0 {
 		t.Fatal("no G-code lines generated")
+	}
+	if program.signature {
+		t.Fatal("signature mode enabled by default")
+	}
+	if program.feedStats.TotalSeconds() != 0 {
+		t.Fatal("draw feed time statistics were computed without signature mode")
+	}
+	if program.curvature.TotalDistance() != 0 {
+		t.Fatal("curvature histogram was computed without signature mode")
+	}
+}
+
+func TestPrepareSVGProgramSignatureModeComputesFeedStats(t *testing.T) {
+	path := svgFixturePath("17-inkscape-signature.svg")
+	cfg := config.Config{PenUp: 0.5, PenDown: 1.7}
+
+	program, err := prepareSVGProgram(path, cfg, svgProgramOptions{
+		tolerance:  0.1,
+		workWidth:  100,
+		workHeight: 100,
+		drawFeed:   600,
+		signature:  true,
+	})
+	if err != nil {
+		t.Fatalf("prepareSVGProgram: %v", err)
+	}
+	if !program.signature {
+		t.Fatal("signature mode was not recorded")
+	}
+	if program.feedStats.TotalSeconds() <= 0 {
+		t.Fatal("draw feed time statistics were not computed")
+	}
+	if program.curvature.TotalDistance() <= 0 {
+		t.Fatal("curvature histogram was not computed")
+	}
+	if !containsSVGCommandFeed(program.lines, "F240") && !containsSVGCommandFeed(program.lines, "F810") {
+		t.Fatal("signature SVG did not include modulated draw feeds")
+	}
+}
+
+func TestLogSVGPreparationReportsDrawFeedTimePercentages(t *testing.T) {
+	var out bytes.Buffer
+	log := console.New(&out)
+	logSVGPreparation(log, svgProgram{
+		signature: true,
+		feedStats: plot.DrawFeedTimeSummary{
+			Slow:   plot.DrawFeedTime{Feed: 240, Seconds: 2},
+			Normal: plot.DrawFeedTime{Feed: 600, Seconds: 3},
+			Fast:   plot.DrawFeedTime{Feed: 810, Seconds: 5},
+		},
+		curvature: plot.CurvatureHistogram{
+			Slow:   plot.CurvatureBand{Feed: 240, Distance: 2, MinDegrees: 0, MaxDegrees: 5},
+			Normal: plot.CurvatureBand{Feed: 600, Distance: 3, MinDegrees: 5, MaxDegrees: 15},
+			Fast:   plot.CurvatureBand{Feed: 810, Distance: 5, MinDegrees: 15, MaxDegrees: 60},
+		},
+	})
+
+	for _, want := range []string{
+		"SVG curvature histogram by drawing distance: low/slow F240 20.0% (0.0..5.0 deg), middle/normal F600 30.0% (5.0..15.0 deg), high/fast F810 50.0% (15.0..60.0 deg)",
+		"SVG estimated pen-down time by feed: slow F240 20.0%, normal F600 30.0%, fast F810 50.0% (total 10.0s)",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("log output = %q, want %q", out.String(), want)
+		}
+	}
+}
+
+func TestLogSVGPreparationSuppressesSignatureStatsByDefault(t *testing.T) {
+	var out bytes.Buffer
+	log := console.New(&out)
+	logSVGPreparation(log, svgProgram{
+		feedStats: plot.DrawFeedTimeSummary{
+			Slow: plot.DrawFeedTime{Feed: 240, Seconds: 2},
+		},
+		curvature: plot.CurvatureHistogram{
+			Slow: plot.CurvatureBand{Feed: 240, Distance: 2},
+		},
+	})
+
+	if strings.Contains(out.String(), "curvature histogram") {
+		t.Fatalf("log output = %q, want no curvature histogram by default", out.String())
+	}
+	if strings.Contains(out.String(), "pen-down time") {
+		t.Fatalf("log output = %q, want no feed timing by default", out.String())
 	}
 }
 
@@ -470,6 +557,15 @@ func svgFixturePath(file string) string {
 	return filepath.Join("..", "..", "testdata", "svg", file)
 }
 
+func containsSVGCommandFeed(lines []gcode.Line, feed string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(line.Command, "G1 X") && strings.Contains(line.Command, feed) {
+			return true
+		}
+	}
+	return false
+}
+
 type commandRecorder struct {
 	commands []string
 }
@@ -583,6 +679,17 @@ func (p *scriptedPort) countWrite(want string) int {
 
 func (p *scriptedPort) sawCommand(want string) bool {
 	return p.countCommand(want) > 0
+}
+
+func (p *scriptedPort) sawCommandPrefix(prefix string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, got := range p.writes {
+		if strings.HasPrefix(strings.TrimSpace(got), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *scriptedPort) countCommand(want string) int {
